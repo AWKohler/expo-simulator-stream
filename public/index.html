@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Expo Stream</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0c0c0e;
+      --surface: #16161a;
+      --surface2: #1e1e24;
+      --border: #2a2a35;
+      --accent: #5b9cf6;
+      --text: #e2e2e8;
+      --muted: #5a5a72;
+      --success: #4ade80;
+      --error: #f87171;
+      --warn: #fbbf24;
+    }
+
+    html, body { height: 100%; background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+      font-size: 14px; }
+    body { display: flex; flex-direction: column; }
+
+    /* ── Header ── */
+    header { display: flex; align-items: center; gap: 16px; padding: 0 20px;
+      height: 52px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+      background: var(--surface); }
+
+    .wordmark { font-size: 15px; font-weight: 700; letter-spacing: -0.4px; white-space: nowrap; }
+    .wordmark em { color: var(--accent); font-style: normal; }
+
+    .url-row { display: flex; align-items: center; gap: 8px; flex: 1; max-width: 620px; }
+
+    #url-input { flex: 1; height: 34px; padding: 0 12px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+      font-size: 13px; outline: none; transition: border-color 0.15s;
+      font-family: 'SF Mono', 'Fira Code', monospace; }
+    #url-input:focus { border-color: var(--accent); }
+    #url-input::placeholder { color: var(--muted); font-family: inherit; }
+
+    button { height: 34px; padding: 0 14px; border-radius: 8px; border: none;
+      font-size: 13px; font-weight: 500; cursor: pointer; transition: opacity 0.15s;
+      white-space: nowrap; }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:not(:disabled):hover { opacity: 0.85; }
+    .btn-ghost { background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+    .btn-ghost:not(:disabled):hover { color: var(--text); border-color: var(--muted); }
+    .btn-warn { background: rgba(251,191,36,0.15); color: var(--warn); border: 1px solid rgba(251,191,36,0.3); }
+
+    /* ── Layout ── */
+    .main { display: flex; flex: 1; min-height: 0; }
+
+    /* ── Sidebar ── */
+    .sidebar { width: 240px; flex-shrink: 0; border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; padding: 14px; gap: 12px; overflow: hidden; }
+
+    .panel { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+    .panel-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px;
+      color: var(--muted); margin-bottom: 8px; }
+
+    .status-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
+    .dot.live  { background: var(--success); box-shadow: 0 0 0 3px rgba(74,222,128,.2); animation: pulse 2s infinite; }
+    .dot.busy  { background: var(--warn); animation: pulse 0.8s infinite; }
+    .dot.error { background: var(--error); }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
+
+    /* Capability badges */
+    .caps { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .cap-badge { font-size: 10px; padding: 2px 7px; border-radius: 4px; font-family: monospace;
+      background: var(--surface); border: 1px solid var(--border); color: var(--muted); }
+    .cap-badge.on { color: var(--success); border-color: rgba(74,222,128,.3); background: rgba(74,222,128,.07); }
+    .cap-badge.warn { color: var(--warn); border-color: rgba(251,191,36,.3); background: rgba(251,191,36,.07); }
+
+    .sidebar-actions { display: flex; flex-direction: column; gap: 6px; }
+
+    .log-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .log-inner { flex: 1; min-height: 0; overflow-y: auto; font-family: monospace;
+      font-size: 10.5px; line-height: 1.55; color: var(--muted); }
+    .log-inner::-webkit-scrollbar { width: 4px; }
+    .log-inner::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .log-line { padding: 1px 0; }
+    .log-line.err { color: var(--error); }
+    .log-line.ok  { color: var(--success); }
+    .log-line.warn { color: var(--warn); }
+
+    /* ── Screen area ── */
+    .screen-area { flex: 1; display: flex; align-items: center; justify-content: center;
+      overflow: hidden; position: relative;
+      background: radial-gradient(ellipse at center, #13131a 0%, var(--bg) 100%); }
+
+    .empty-state { text-align: center; max-width: 320px; pointer-events: none; }
+    .empty-state h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.5px; margin-bottom: 10px; }
+    .empty-state p { font-size: 13px; color: var(--muted); line-height: 1.6; }
+    .empty-state .hint { display: inline-block; margin-top: 16px; padding: 6px 12px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+      font-size: 11px; font-family: monospace; color: var(--accent); }
+
+    #canvas-wrap { display: none; position: relative; }
+
+    #screen { display: block; border-radius: 12px; cursor: crosshair; user-select: none;
+      -webkit-user-drag: none; max-height: calc(100vh - 52px); max-width: 100%;
+      width: auto; height: auto;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 24px 80px rgba(0,0,0,0.6); }
+
+    .overlay-badge { position: absolute; top: 10px; right: 10px;
+      background: rgba(0,0,0,0.55); backdrop-filter: blur(6px); border-radius: 6px;
+      padding: 3px 8px; font-size: 11px; font-family: monospace; color: var(--success);
+      pointer-events: none; }
+
+    /* ── Tap ripple ── */
+    .ripple { position: absolute; width: 36px; height: 36px; border-radius: 50%;
+      border: 2px solid var(--accent); pointer-events: none;
+      transform: translate(-50%, -50%) scale(0.4); opacity: 1;
+      transition: transform 0.35s ease-out, opacity 0.35s ease-out; }
+    .ripple.pop { transform: translate(-50%, -50%) scale(1.3); opacity: 0; }
+
+    /* ── Calibration overlay ── */
+    #cal-overlay { display: none; position: absolute; inset: 0; z-index: 10; }
+
+    /* The 4 draggable corner handles */
+    .cal-handle {
+      position: absolute; width: 22px; height: 22px; border-radius: 50%;
+      background: rgba(91,156,246,0.9); border: 2px solid #fff;
+      cursor: grab; transform: translate(-50%, -50%);
+      box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+      transition: background 0.1s;
+    }
+    .cal-handle:active { cursor: grabbing; background: var(--warn); }
+
+    /* Translucent rectangle showing the current screen rect */
+    #cal-rect { position: absolute; border: 2px solid var(--accent);
+      background: rgba(91,156,246,0.08); pointer-events: none; }
+
+    #cal-toolbar { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 8px; background: rgba(0,0,0,0.75); backdrop-filter: blur(12px);
+      padding: 10px 16px; border-radius: 12px; border: 1px solid var(--border); }
+    #cal-toolbar p { color: var(--muted); font-size: 12px; align-self: center; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wordmark">expo<em>stream</em></div>
+  <div class="url-row">
+    <input id="url-input" type="text"
+      placeholder="exp://192.168.x.x:8081  or  http://..."
+      autofocus />
+    <button id="launch-btn" class="btn-primary">Launch</button>
+    <button id="stop-btn" class="btn-ghost" disabled>Stop</button>
+  </div>
+</header>
+
+<div class="main">
+
+  <div class="sidebar">
+    <div class="panel">
+      <div class="panel-label">Status</div>
+      <div class="status-row">
+        <div class="dot" id="dot"></div>
+        <span id="status-text">Idle</span>
+      </div>
+      <div class="caps">
+        <span class="cap-badge" id="badge-sck">SCK</span>
+        <span class="cap-badge" id="badge-idb">idb</span>
+      </div>
+    </div>
+
+    <div class="sidebar-actions">
+      <button id="cal-btn" class="btn-ghost" disabled>Calibrate Screen Area</button>
+      <button id="cal-reset-btn" class="btn-ghost" style="display:none">Reset Calibration</button>
+    </div>
+
+    <div class="log-wrap">
+      <div class="panel-label">Log</div>
+      <div class="log-inner" id="log"></div>
+    </div>
+  </div>
+
+  <div class="screen-area" id="screen-area">
+    <div class="empty-state" id="empty-state">
+      <h2>No stream active</h2>
+      <p>Enter an Expo URL and click <strong>Launch</strong> to boot<br>
+         iPhone 16 Pro and start streaming.</p>
+      <div class="hint">exp://192.168.x.x:8081</div>
+    </div>
+
+    <div id="canvas-wrap">
+      <canvas id="screen"></canvas>
+      <div class="overlay-badge" id="fps-badge">-- fps</div>
+
+      <!-- Calibration overlay (hidden by default) -->
+      <div id="cal-overlay">
+        <div id="cal-rect"></div>
+        <div class="cal-handle" id="h-tl" data-corner="tl"></div>
+        <div class="cal-handle" id="h-tr" data-corner="tr"></div>
+        <div class="cal-handle" id="h-bl" data-corner="bl"></div>
+        <div class="cal-handle" id="h-br" data-corner="br"></div>
+        <div id="cal-toolbar">
+          <p>Drag corners to match the device screen edges</p>
+          <button class="btn-primary" id="cal-save-btn" style="height:30px;padding:0 12px;font-size:12px">Save</button>
+          <button class="btn-ghost" id="cal-cancel-btn" style="height:30px;padding:0 10px;font-size:12px">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const canvas    = $('screen');
+const ctx       = canvas.getContext('2d');
+const urlInput  = $('url-input');
+const launchBtn = $('launch-btn');
+const stopBtn   = $('stop-btn');
+const calBtn    = $('cal-btn');
+const calReset  = $('cal-reset-btn');
+const dot       = $('dot');
+const statusText= $('status-text');
+const fpsBadge  = $('fps-badge');
+const emptyState= $('empty-state');
+const canvasWrap= $('canvas-wrap');
+const logEl     = $('log');
+const badgeSCK  = $('badge-sck');
+const badgeIDB  = $('badge-idb');
+const calOverlay= $('cal-overlay');
+const calRect   = $('cal-rect');
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+const ws = new WebSocket(`ws://${location.host}`);
+
+// ── App state ──────────────────────────────────────────────────────────────
+let frameCount = 0, fpsTime = Date.now();
+let dragActive = false, dragStart = null;
+
+// Server-provided calibration: screen rect in logical window points
+// Normalized to window logical size for rendering on canvas
+let calibration = null;     // { left, top, right, bottom } in window logical pt
+let windowInfo  = null;     // { w, h, scale } window logical size
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function setStatus(text, mode = '') {
+  statusText.textContent = text;
+  dot.className = 'dot' + (mode ? ' ' + mode : '');
+}
+
+function addLog(msg, cls = '') {
+  const el = document.createElement('div');
+  el.className = 'log-line' + (cls ? ' ' + cls : '');
+  const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+  el.textContent = `${ts}  ${msg}`;
+  logEl.appendChild(el);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function updateBadges(caps) {
+  if (caps.captureMethod === 'ScreenCaptureKit') {
+    badgeSCK.className = 'cap-badge on';
+    badgeSCK.textContent = 'SCK ✓';
+  } else {
+    badgeSCK.className = 'cap-badge warn';
+    badgeSCK.textContent = 'screencapture';
+  }
+  if (caps.hasIDB) {
+    badgeIDB.className = 'cap-badge on';
+    badgeIDB.textContent = 'idb ✓';
+  } else {
+    badgeIDB.className = 'cap-badge warn';
+    badgeIDB.textContent = 'idb ✗';
+  }
+}
+
+// ── WebSocket messages ─────────────────────────────────────────────────────
+ws.onopen  = () => { setStatus('Connected'); addLog('Connected'); };
+ws.onclose = () => { setStatus('Disconnected', 'error'); addLog('Disconnected', 'err'); };
+
+ws.onmessage = (e) => {
+  const msg = JSON.parse(e.data);
+
+  if (msg.type === 'frame') {
+    const img = new Image();
+    img.onload = () => {
+      if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+        canvas.width  = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+      }
+      ctx.drawImage(img, 0, 0);
+      frameCount++;
+      const now = Date.now();
+      if (now - fpsTime >= 1000) {
+        fpsBadge.textContent = `${Math.round(frameCount * 1000 / (now - fpsTime))} fps`;
+        frameCount = 0; fpsTime = now;
+      }
+    };
+    img.src = `data:image/jpeg;base64,${msg.data}`;
+    return;
+  }
+
+  if (msg.type === 'capabilities') updateBadges(msg);
+
+  if (msg.type === 'calibration') {
+    calibration = msg.screenRect;
+    windowInfo  = msg.windowInfo;
+    addLog(`Screen rect: L=${Math.round(msg.screenRect.left)} T=${Math.round(msg.screenRect.top)} R=${Math.round(msg.screenRect.right)} B=${Math.round(msg.screenRect.bottom)}`);
+  }
+
+  if (msg.type === 'launching') {
+    setStatus('Launching…', 'busy');
+    launchBtn.disabled = true; stopBtn.disabled = true; calBtn.disabled = true;
+  }
+
+  if (msg.type === 'status') {
+    setStatus(msg.message, 'busy');
+    addLog(msg.message);
+  }
+
+  if (msg.type === 'warn') addLog('⚠ ' + msg.message, 'warn');
+
+  if (msg.type === 'ready') {
+    setStatus(msg.message || 'Streaming', 'live');
+    addLog(msg.message || 'Stream started', 'ok');
+    emptyState.style.display = 'none';
+    canvasWrap.style.display = 'block';
+    stopBtn.disabled = false;
+    calBtn.disabled = false;
+    calReset.style.display = 'inline-flex';
+    launchBtn.disabled = false;
+  }
+
+  if (msg.type === 'error') {
+    setStatus('Error', 'error');
+    addLog(msg.message, 'err');
+    launchBtn.disabled = false;
+  }
+
+  if (msg.type === 'stopped') {
+    setStatus('Stopped'); launchBtn.disabled = false; stopBtn.disabled = true;
+  }
+};
+
+// ── Launch ─────────────────────────────────────────────────────────────────
+function launch() {
+  const url = urlInput.value.trim();
+  if (!url) { urlInput.focus(); return; }
+  addLog(`Launch → ${url}`);
+  ws.send(JSON.stringify({ type: 'launch', url }));
+}
+launchBtn.onclick = launch;
+urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') launch(); });
+stopBtn.onclick = () => {
+  ws.send(JSON.stringify({ type: 'stop' }));
+  setStatus('Stopping…');
+};
+
+// ── Touch helpers ──────────────────────────────────────────────────────────
+function normPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    normX: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
+    normY: Math.max(0, Math.min(1, (e.clientY - r.top)  / r.height)),
+  };
+}
+
+function showRipple(clientX, clientY) {
+  const r = document.createElement('div');
+  r.className = 'ripple';
+  const rect = canvasWrap.getBoundingClientRect();
+  r.style.left = (clientX - rect.left) + 'px';
+  r.style.top  = (clientY - rect.top)  + 'px';
+  canvasWrap.appendChild(r);
+  requestAnimationFrame(() => r.classList.add('pop'));
+  setTimeout(() => r.remove(), 400);
+}
+
+// ── Drag / tap ─────────────────────────────────────────────────────────────
+// Catch-all: log what element receives each click
+document.addEventListener('mousedown', (e) => {
+  addLog(`click → ${e.target.tagName}#${e.target.id || '?'} canvasWrap=${canvasWrap.style.display}`);
+});
+
+canvas.addEventListener('mousedown', (e) => {
+  if (calOpen) return;
+  e.preventDefault();
+  dragActive = true;
+  dragStart = { pos: normPos(e), clientX: e.clientX, clientY: e.clientY };
+});
+
+// mouseup on window — so releasing outside the canvas still fires the tap/swipe
+window.addEventListener('mouseup', (e) => {
+  if (!dragActive) return;
+  dragActive = false;
+  const end = normPos(e);
+  const dx = end.normX - dragStart.pos.normX;
+  const dy = end.normY - dragStart.pos.normY;
+
+  if (Math.hypot(dx, dy) < 0.015) {
+    addLog(`Sending tap normX=${end.normX.toFixed(2)} normY=${end.normY.toFixed(2)} wsState=${ws.readyState}`);
+    showRipple(e.clientX, e.clientY);
+    ws.send(JSON.stringify({ type: 'tap', normX: end.normX, normY: end.normY }));
+  } else {
+    addLog(`Sending swipe wsState=${ws.readyState}`);
+    ws.send(JSON.stringify({
+      type: 'swipe',
+      startX: dragStart.pos.normX, startY: dragStart.pos.normY,
+      endX: end.normX, endY: end.normY,
+    }));
+  }
+  dragStart = null;
+});
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ── Scroll / trackpad ─────────────────────────────────────────────────────
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (calOpen) return;
+  const { normX, normY } = normPos(e);
+  ws.send(JSON.stringify({
+    type: 'scroll',
+    normX, normY,
+    deltaX: e.deltaX,
+    deltaY: e.deltaY,
+  }));
+}, { passive: false });
+
+// ── Calibration overlay ────────────────────────────────────────────────────
+// cal state: { tl, tr, bl, br } — positions in canvas CSS pixels
+let calHandles = {};
+let calDragging = null;
+let calOpen = false;
+
+function calNormToCSS(normX, normY) {
+  const r = canvas.getBoundingClientRect();
+  return { x: normX * r.width, y: normY * r.height };
+}
+
+function calWindowPtToNorm(windowPtX, windowPtY) {
+  // windowInfo is in logical points; normalize to 0–1 within the window
+  if (!windowInfo) return { nx: 0.5, ny: 0.5 };
+  return { nx: windowPtX / windowInfo.w, ny: windowPtY / windowInfo.h };
+}
+
+function updateCalRect() {
+  const { tl, br } = calHandles;
+  if (!tl || !br) return;
+  calRect.style.left   = tl.cssX + 'px';
+  calRect.style.top    = tl.cssY + 'px';
+  calRect.style.width  = (br.cssX - tl.cssX) + 'px';
+  calRect.style.height = (br.cssY - tl.cssY) + 'px';
+}
+
+function positionHandle(id, cssX, cssY) {
+  const el = $('h-' + id);
+  el.style.left = cssX + 'px';
+  el.style.top  = cssY + 'px';
+  calHandles[id] = { el, cssX, cssY };
+}
+
+function openCalibration() {
+  if (!calibration || !windowInfo) return;
+
+  const normLeft   = calibration.left   / windowInfo.w;
+  const normTop    = calibration.top    / windowInfo.h;
+  const normRight  = calibration.right  / windowInfo.w;
+  const normBottom = calibration.bottom / windowInfo.h;
+
+  const tl = calNormToCSS(normLeft,  normTop);
+  const tr = calNormToCSS(normRight, normTop);
+  const bl = calNormToCSS(normLeft,  normBottom);
+  const br = calNormToCSS(normRight, normBottom);
+
+  positionHandle('tl', tl.x, tl.y);
+  positionHandle('tr', tr.x, tr.y);
+  positionHandle('bl', bl.x, bl.y);
+  positionHandle('br', br.x, br.y);
+
+  updateCalRect();
+  calOverlay.style.display = 'block';
+  calOpen = true;
+}
+
+// Make handles draggable
+['tl','tr','bl','br'].forEach(id => {
+  const el = $('h-' + id);
+  el.addEventListener('mousedown', (e) => {
+    e.stopPropagation();
+    calDragging = id;
+  });
+});
+
+calOverlay.addEventListener('mousemove', (e) => {
+  if (!calDragging) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  const id = calDragging;
+  calHandles[id] = { el: $('h-' + id), cssX: x, cssY: y };
+  $('h-' + id).style.left = x + 'px';
+  $('h-' + id).style.top  = y + 'px';
+
+  // Sync linked handles (maintain rectangle)
+  if (id === 'tl') { calHandles['tr'].cssY = y; $('h-tr').style.top = y + 'px';
+                     calHandles['bl'].cssX = x; $('h-bl').style.left = x + 'px'; }
+  if (id === 'tr') { calHandles['tl'].cssY = y; $('h-tl').style.top = y + 'px';
+                     calHandles['br'].cssX = x; $('h-br').style.left = x + 'px'; }
+  if (id === 'bl') { calHandles['br'].cssY = y; $('h-br').style.top = y + 'px';
+                     calHandles['tl'].cssX = x; $('h-tl').style.left = x + 'px'; }
+  if (id === 'br') { calHandles['bl'].cssY = y; $('h-bl').style.top = y + 'px';
+                     calHandles['tr'].cssX = x; $('h-tr').style.left = x + 'px'; }
+
+  updateCalRect();
+});
+
+calOverlay.addEventListener('mouseup', () => { calDragging = null; });
+
+$('cal-save-btn').onclick = () => {
+  // Convert CSS pixel positions back to window logical points
+  const r = canvas.getBoundingClientRect();
+  const { tl, br } = calHandles;
+  const newRect = {
+    left:   (tl.cssX / r.width)  * windowInfo.w,
+    top:    (tl.cssY / r.height) * windowInfo.h,
+    right:  (br.cssX / r.width)  * windowInfo.w,
+    bottom: (br.cssY / r.height) * windowInfo.h,
+  };
+  ws.send(JSON.stringify({ type: 'set_calibration', screenRect: newRect }));
+  calOverlay.style.display = 'none';
+  calOpen = false;
+  addLog('Calibration saved', 'ok');
+};
+
+$('cal-cancel-btn').onclick = () => { calOverlay.style.display = 'none'; calOpen = false; };
+
+calBtn.onclick = openCalibration;
+
+calReset.onclick = () => {
+  ws.send(JSON.stringify({ type: 'reset_calibration' }));
+  addLog('Calibration reset to auto-detected values');
+};
+</script>
+</body>
+</html>

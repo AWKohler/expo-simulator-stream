@@ -1,0 +1,14 @@
+{
+  "name": "expo-stream",
+  "version": "1.0.0",
+  "description": "Stream iOS Simulator to browser with interactive touch",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.14.2"
+  }
+}
