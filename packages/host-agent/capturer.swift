@@ -130,7 +130,42 @@ class Capturer: NSObject, SCStreamOutput, SCStreamDelegate {
 var liveStream: SCStream? = nil
 var liveCapturer: Capturer? = nil
 
+// JSON listing mode: prints `[{id, title, x, y, w, h}, ...]` for every Simulator
+// window to stdout and exits. Used by the host-agent to discover which window
+// belongs to a newly-booted device (diff before/after `simctl boot`).
+func listWindowsJSONAndExit() async -> Never {
+    let content: SCShareableContent
+    do {
+        content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+    } catch {
+        let err: [String: Any] = ["error": error.localizedDescription]
+        let data = try! JSONSerialization.data(withJSONObject: err)
+        FileHandle.standardOutput.write(data)
+        exit(2)
+    }
+    let sims = content.windows.filter {
+        $0.owningApplication?.bundleIdentifier == "com.apple.iphonesimulator"
+    }
+    let payload: [[String: Any]] = sims.map { w in
+        [
+            "id": w.windowID,
+            "title": w.title ?? "",
+            "x": Int(w.frame.origin.x),
+            "y": Int(w.frame.origin.y),
+            "w": Int(w.frame.width),
+            "h": Int(w.frame.height),
+        ]
+    }
+    let data = try! JSONSerialization.data(withJSONObject: payload)
+    FileHandle.standardOutput.write(data)
+    exit(0)
+}
+
 func run() async {
+    if CommandLine.arguments.contains("--list-windows-json") {
+        await listWindowsJSONAndExit()
+    }
+
     let cfg = parseArgs()
 
     // Requesting shareable content triggers the Screen Recording permission prompt

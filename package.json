@@ -1,14 +1,21 @@
 {
   "name": "expo-stream",
-  "version": "1.0.0",
-  "description": "Stream iOS Simulator to browser with interactive touch",
-  "main": "server.js",
+  "version": "0.2.0",
+  "private": true,
+  "description": "iOS Simulator streaming platform — Controller + Host Agent + Web",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "build": "pnpm -r --parallel run build",
+    "dev:controller": "pnpm --filter @sim/controller dev",
+    "dev:host": "pnpm --filter @sim/host-agent dev",
+    "dev:web": "pnpm --filter @sim/web dev",
+    "dev": "pnpm --parallel --filter @sim/controller --filter @sim/host-agent --filter @sim/web dev",
+    "typecheck": "pnpm -r --parallel run typecheck"
   },
-  "dependencies": {
-    "express": "^4.18.2",
-    "ws": "^8.14.2"
-  }
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@8.15.5"
 }

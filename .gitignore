@@ -1,6 +1,27 @@
 node_modules/
-*.lock
 .DS_Store
 /tmp/expo_stream_capturer
 *.o
 *.d
+
+# Build artifacts
+dist/
+.next/
+.turbo/
+*.tsbuildinfo
+packages/host-agent/native/framebuffer-capturer/build/
+
+# Lockfiles — keep pnpm, ignore others
+*.lock
+package-lock.json
+yarn.lock
+!pnpm-lock.yaml
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# Cloudflare tunnel credentials (per-machine)
+infra/*.json
+infra/*-creds.yml

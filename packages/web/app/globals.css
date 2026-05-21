@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0c0c0e;
+  --surface: #16161a;
+  --surface2: #1e1e24;
+  --border: #2a2a35;
+  --accent: #5b9cf6;
+  --text: #e2e2e8;
+  --muted: #6b6b7e;
+  --success: #4ade80;
+  --error: #f87171;
+  --warn: #fbbf24;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+  font-size: 14px;
+  min-height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.dot {
+  width: 8px; height: 8px; border-radius: 9999px;
+  background: var(--muted); display: inline-block;
+}
+.dot.live  { background: var(--success); box-shadow: 0 0 0 3px rgba(74,222,128,.2); animation: pulse 2s infinite; }
+.dot.busy  { background: var(--warn); animation: pulse 0.8s infinite; }
+.dot.error { background: var(--error); }
+
+.ripple {
+  position: absolute; width: 36px; height: 36px; border-radius: 50%;
+  border: 2px solid var(--accent); pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.4); opacity: 1;
+  transition: transform 0.35s ease-out, opacity 0.35s ease-out;
+}
+.ripple.pop { transform: translate(-50%, -50%) scale(1.3); opacity: 0; }

@@ -1,0 +1,22 @@
+# Cloudflare Tunnel ingress for sim.stream PoC.
+# Copy to cloudflared-config.yml and fill in <tunnel-id> and your hostname.
+# Single-host PoC layout: web on :3000, controller on :8080 (HTTP + WS).
+# Cloudflare routes /api/*, /ws/* to the controller and everything else to the web app.
+
+tunnel: <tunnel-id>
+credentials-file: ~/.cloudflared/<tunnel-id>.json
+
+# Required for sticky WebSockets through cloudflared.
+# noTLSVerify isn't needed because both targets are localhost HTTP.
+originRequest:
+  connectTimeout: 30s
+  keepAliveTimeout: 90s
+  noHappyEyeballs: true
+
+ingress:
+  - hostname: sim.example.com
+    path: ^/(api|ws)(/|$).*
+    service: http://localhost:8080
+  - hostname: sim.example.com
+    service: http://localhost:3000
+  - service: http_status:404
