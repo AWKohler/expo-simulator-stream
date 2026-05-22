@@ -39,6 +39,7 @@ app.get('/health', (_req, res) => {
       id: h.hostId,
       slots: h.slots,
       active: h.activeSessionIds.size,
+      kind: h.kind,
       lastHeartbeat: h.lastHeartbeat,
     })),
   });

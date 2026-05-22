@@ -17,6 +17,13 @@ const HOST_TOKEN = process.env.HOST_TOKEN ?? 'dev-token';
 const HOST_ID = process.env.HOST_ID ?? `${os.hostname()}-${process.pid}`;
 const HOST_SLOTS = Math.max(1, parseInt(process.env.HOST_SLOTS ?? '2', 10));
 const CAPTURE_MODE = (process.env.SIM_CAPTURE_MODE ?? 'sck').toLowerCase();
+// HOST_KIND broadcasts the host's isolation posture to the controller so it
+// can refuse to place tenant sessions on bare-metal hosts (Phase 1+). 'vm'
+// when this agent runs inside a tart VM; 'bare-metal' (default) otherwise.
+const HOST_KIND = ((): 'vm' | 'bare-metal' => {
+  const raw = (process.env.HOST_KIND ?? 'bare-metal').toLowerCase();
+  return raw === 'vm' ? 'vm' : 'bare-metal';
+})();
 
 // session.id → Session, udid pool
 const sessions = new Map<string, Session>();
@@ -74,7 +81,7 @@ function releaseUdid(udid: string): void {
 }
 
 async function main(): Promise<void> {
-  log(`Host ${HOST_ID} starting (slots=${HOST_SLOTS}, capture=${CAPTURE_MODE}, idb=${hasIDB()})`);
+  log(`Host ${HOST_ID} starting (slots=${HOST_SLOTS}, kind=${HOST_KIND}, capture=${CAPTURE_MODE}, idb=${hasIDB()})`);
 
   // Capability detection up-front so the first session doesn't pay these costs.
   const detected = detect();
@@ -111,6 +118,7 @@ async function main(): Promise<void> {
       hostId: HOST_ID,
       hostToken: HOST_TOKEN,
       slots: HOST_SLOTS,
+      kind: HOST_KIND,
     },
     { onCommand: handleCommand },
     () => [...sessions.keys()],

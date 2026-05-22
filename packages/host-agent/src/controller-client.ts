@@ -2,6 +2,7 @@ import os from 'node:os';
 import { WebSocket } from 'ws';
 import {
   ControllerToHost,
+  type HostKind,
   type HostToController,
   type ResourceReport,
   safeParse,
@@ -13,6 +14,9 @@ export interface ControllerClientOptions {
   hostId: string;
   hostToken: string;
   slots: number;
+  /** Isolation posture broadcast to the orchestrator. Defaults to 'bare-metal'
+   * so the controller can keep older agents off tenant traffic by default. */
+  kind?: HostKind;
   reconnectMs?: number;
   pingMs?: number;
 }
@@ -40,6 +44,7 @@ export class ControllerClient {
     this.opts = {
       reconnectMs: 2000,
       pingMs: 30_000,
+      kind: 'bare-metal',
       ...opts,
     };
     this.handlers = handlers;
@@ -72,6 +77,7 @@ export class ControllerClient {
         capacity: {
           slots: this.opts.slots,
           deviceModels: ['iPhone-16-Pro'],
+          kind: this.opts.kind,
         },
         resources: collectResources(),
       });

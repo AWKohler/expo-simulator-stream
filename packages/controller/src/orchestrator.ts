@@ -4,13 +4,17 @@
 // move the registry into a real store.
 
 import { randomUUID } from 'node:crypto';
-import type { DeviceModel, ResourceReport, SessionState } from '@sim/shared';
+import type { DeviceModel, HostKind, ResourceReport, SessionState } from '@sim/shared';
 import { log, warn } from './log.js';
 
 export interface HostRecord {
   hostId: string;
   slots: number;
   deviceModels: DeviceModel[];
+  /** Trust posture broadcast by the host on HELLO. Tenant sessions land on
+   * `kind === 'vm'` hosts only, unless ALLOW_BARE_METAL_FALLBACK=1 is set on
+   * the controller. Older agents that omit `kind` default to 'bare-metal'. */
+  kind: HostKind;
   resources: ResourceReport;
   activeSessionIds: Set<string>;
   send: (msg: unknown) => void;
@@ -102,7 +106,7 @@ export class Orchestrator {
       existing.close();
     }
     this.hosts.set(host.hostId, host);
-    log(`Host registered: ${host.hostId} slots=${host.slots}`);
+    log(`Host registered: ${host.hostId} slots=${host.slots} kind=${host.kind}`);
     this.placeQueued();
   }
 
@@ -387,21 +391,41 @@ export class Orchestrator {
     this.updateQueuePositions();
   }
 
+  /**
+   * Set to true via ALLOW_BARE_METAL_FALLBACK=1 on the controller env. When
+   * false (default), tenant sessions are NEVER placed on bare-metal hosts —
+   * a bare-metal agent can stay alive for internal smoke tests without
+   * accidentally serving real users. When true, bare-metal is allowed only
+   * if no VM host has a free slot.
+   */
+  private readonly allowBareMetalFallback =
+    (process.env.ALLOW_BARE_METAL_FALLBACK ?? '').toLowerCase() === '1' ||
+    (process.env.ALLOW_BARE_METAL_FALLBACK ?? '').toLowerCase() === 'true';
+
   private pickHost(): HostRecord | null {
-    let best: HostRecord | null = null;
-    for (const h of this.hosts.values()) {
-      const free = h.slots - h.activeSessionIds.size;
-      if (free <= 0) continue;
-      if (!best) {
-        best = h;
-        continue;
+    // Two-pass: prefer kind='vm' hosts (the isolation boundary). Only fall
+    // back to bare-metal if the operator opted in AND no VM has capacity.
+    const pick = (predicate: (h: HostRecord) => boolean): HostRecord | null => {
+      let best: HostRecord | null = null;
+      for (const h of this.hosts.values()) {
+        if (!predicate(h)) continue;
+        const free = h.slots - h.activeSessionIds.size;
+        if (free <= 0) continue;
+        if (!best) {
+          best = h;
+          continue;
+        }
+        const bestFree = best.slots - best.activeSessionIds.size;
+        // Best-fit: prefer host with the FEWEST free slots (densest packing).
+        if (free < bestFree) best = h;
       }
-      const bestFree = best.slots - best.activeSessionIds.size;
-      // Best-fit: prefer host with the FEWEST free slots (densest packing).
-      // Reverses easily once we have richer scoring (cpu/mem/etc).
-      if (free < bestFree) best = h;
-    }
-    return best;
+      return best;
+    };
+
+    const vmPick = pick((h) => h.kind === 'vm');
+    if (vmPick) return vmPick;
+    if (this.allowBareMetalFallback) return pick((h) => h.kind === 'bare-metal');
+    return null;
   }
 
   private updateQueuePositions(): void {

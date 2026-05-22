@@ -103,6 +103,10 @@ function handleHostConnection(
         hostId: msg.hostId,
         slots: msg.capacity.slots,
         deviceModels: msg.capacity.deviceModels,
+        // Default to 'bare-metal' for older agents that don't advertise kind.
+        // The orchestrator's pickHost() refuses to place tenants there unless
+        // ALLOW_BARE_METAL_FALLBACK is enabled.
+        kind: msg.capacity.kind ?? 'bare-metal',
         resources: msg.resources,
         activeSessionIds: new Set(),
         lastHeartbeat: Date.now(),

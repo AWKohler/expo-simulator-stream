@@ -236,6 +236,17 @@ export type SessionSummary = z.infer<typeof SessionSummary>;
 // ──────────────────────────────────────────────────────────────────────────────
 
 // Host → Controller
+// `kind` declares the host's trust + isolation posture.
+//   'vm'         — runs inside a dedicated tart VM (Phase 1+). Eligible for
+//                  tenant placement. Destroyed + recreated per session.
+//   'bare-metal' — runs on the build Mac directly. Used for internal smoke
+//                  tests only. Excluded from tenant placement unless the
+//                  controller is started with ALLOW_BARE_METAL_FALLBACK=1.
+// Optional for backwards compat — older host-agents that omit it are
+// treated as 'bare-metal' by the orchestrator.
+export const HostKind = z.enum(['vm', 'bare-metal']);
+export type HostKind = z.infer<typeof HostKind>;
+
 export const HostHelloMsg = z.object({
   type: z.literal('hello'),
   hostId: z.string(),
@@ -243,6 +254,7 @@ export const HostHelloMsg = z.object({
   capacity: z.object({
     slots: z.number(),
     deviceModels: z.array(DeviceModel),
+    kind: HostKind.optional(),
   }),
   resources: ResourceReport,
 });

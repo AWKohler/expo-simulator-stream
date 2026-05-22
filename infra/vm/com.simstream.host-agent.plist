@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Host-agent launchd unit baked into the tart golden image.
+
+  Reads runtime env from /etc/sim-vm/env (placed by vm-manager into each
+  spawned VM via `tart --mount` or scp). That file should look like:
+
+    CONTROLLER_URL=wss://controller.example/ws/host
+    HOST_TOKEN=<shared secret>
+    HOST_ID=vm-<unique>
+    HOST_SLOTS=1
+    HOST_KIND=vm
+    SIM_CAPTURE_MODE=framebuffer
+
+  The plist itself stays static; per-VM identity flows through the env file
+  so the golden never needs to be re-baked just because identifiers change.
+
+  Install path inside the VM:
+    ~/Library/LaunchAgents/com.simstream.host-agent.plist
+  Load:
+    launchctl load -w ~/Library/LaunchAgents/com.simstream.host-agent.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.simstream.host-agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <!--
+          Read /etc/sim-vm/env (line-delimited KEY=VALUE pairs), then exec
+          pnpm dev:host. Doing the env-load in bash keeps the plist itself
+          immutable — only /etc/sim-vm/env varies per VM.
+        -->
+        <string>set -a; [ -f /etc/sim-vm/env ] &amp;&amp; source /etc/sim-vm/env; set +a; cd /Users/admin/expo-stream &amp;&amp; exec /Users/admin/.nvm/versions/node/v22.0.0/bin/pnpm dev:host</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <!-- Restart if it crashes; do NOT restart if the process exits 0
+             (a clean shutdown by vm-manager destroying the VM). -->
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/sim-host.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/sim-host.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/admin/expo-stream</string>
+
+    <!-- Throttle restarts: if the agent crash-loops we don't want it
+         hammering the controller. 30s between attempts. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>
