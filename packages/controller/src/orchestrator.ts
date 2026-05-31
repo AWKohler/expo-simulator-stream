@@ -3,7 +3,7 @@
 // Scaling this to a fleet is just: replace `placeNext` with a smarter scorer and
 // move the registry into a real store.
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { DeviceModel, HostKind, ResourceReport, SessionState } from '@sim/shared';
 import { log, warn } from './log.js';
 
@@ -24,6 +24,12 @@ export interface HostRecord {
 
 export interface SessionRecord {
   sessionId: string;
+  /** Per-session capability secret, separate from the sessionId. Required (in
+   * secured mode) on the browser-facing `/ws/session/:id` upgrade. The sessionId
+   * travels through many channels (REST, DB, logs); this token travels only in
+   * the WS connect URL and grants nothing but stream access to this one session,
+   * so a leaked/guessed sessionId is no longer sufficient to hijack a stream. */
+  streamToken: string;
   deviceModel: DeviceModel;
   state: SessionState;
   hostId: string | null;
@@ -151,6 +157,7 @@ export class Orchestrator {
     const sessionId = randomUUID();
     const record: SessionRecord = {
       sessionId,
+      streamToken: randomBytes(32).toString('base64url'),
       deviceModel,
       state: 'queued',
       hostId: null,
@@ -172,6 +179,21 @@ export class Orchestrator {
 
   getSession(sessionId: string): SessionRecord | null {
     return this.sessions.get(sessionId) ?? null;
+  }
+
+  /**
+   * Constant-time check that `token` is the stream capability for `sessionId`.
+   * Returns false for unknown sessions or absent/mismatched tokens. Used to gate
+   * the browser-facing WS upgrade so a bare sessionId can't open a stream.
+   */
+  verifyStreamToken(sessionId: string, token: string | null | undefined): boolean {
+    const s = this.sessions.get(sessionId);
+    if (!s || !token) return false;
+    const expected = Buffer.from(s.streamToken);
+    const provided = Buffer.from(token);
+    // timingSafeEqual throws on length mismatch — guard first (length isn't secret).
+    if (expected.length !== provided.length) return false;
+    return timingSafeEqual(expected, provided);
   }
 
   endSession(sessionId: string, reason?: string): void {

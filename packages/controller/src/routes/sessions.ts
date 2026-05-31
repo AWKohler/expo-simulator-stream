@@ -33,6 +33,13 @@ export function sessionRouter(orch: Orchestrator, options: SessionRouterOptions)
     next();
   };
 
+  // Gate the ENTIRE session REST surface — not just /build. Session creation
+  // spins up a real simulator on the Mac, so an open create endpoint behind the
+  // public tunnel is a DoS / resource-abuse hole. All legitimate callers
+  // (botflow's server) already send X-Platform-Token; browsers never hit this
+  // surface directly. No-op when platformToken is unset (local dev).
+  router.use(requirePlatformToken);
+
   router.post('/', express.json(), (req: Request, res: Response) => {
     const parsed = CreateSessionBody.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -40,7 +47,10 @@ export function sessionRouter(orch: Orchestrator, options: SessionRouterOptions)
       return;
     }
     const session = orch.createSession(parsed.data.deviceModel, parsed.data.awaitBuild);
-    res.status(201).json(toSummary(session));
+    // streamToken is returned ONLY here (on create) so it stays out of the
+    // GET/:id response surface. The caller (botflow server) appends it to the
+    // browser's WS URL.
+    res.status(201).json({ ...toSummary(session), streamToken: session.streamToken });
   });
 
   router.get('/:id', (req: Request<{ id: string }>, res: Response) => {
@@ -60,7 +70,6 @@ export function sessionRouter(orch: Orchestrator, options: SessionRouterOptions)
   // ── Build upload — IDE-only endpoint ────────────────────────────────────────
   router.post(
     '/:id/build',
-    requirePlatformToken,
     express.raw({ type: '*/*', limit: options.maxBuildBodyBytes }),
     (req: Request<{ id: string }>, res: Response) => {
       const sessionId = req.params.id;

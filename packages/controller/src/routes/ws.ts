@@ -15,6 +15,31 @@ import { log, warn } from '../log.js';
 
 interface AttachOptions {
   hostToken: string;
+  /** Origins permitted to open the browser-facing session WS. `['*']` disables
+   * the check (local dev). Browsers always send Origin; non-browser clients can
+   * forge it, so this is defense-in-depth layered under the stream token. */
+  allowedOrigins: string[];
+  /** When true, `/ws/session/:id` upgrades must carry a `?token=` matching the
+   * session's streamToken. Tied to whether the controller runs in secured mode
+   * (a platform token is configured), so local dev with the bare web app still
+   * connects with just a sessionId. */
+  requireSessionToken: boolean;
+}
+
+/** Reject 4xx the raw upgrade socket before a WebSocket is established. */
+function denyUpgrade(socket: { write: (s: string) => void; destroy: () => void }, status: string): void {
+  try {
+    socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
+  } catch {
+    /* ignore */
+  }
+  socket.destroy();
+}
+
+function originAllowed(origin: string | undefined, allowed: string[]): boolean {
+  if (allowed.includes('*')) return true;
+  if (!origin) return false; // locked-down mode requires an explicit, allowed Origin
+  return allowed.includes(origin);
 }
 
 export function attachWS(
@@ -37,6 +62,21 @@ export function attachWS(
     const m = /^\/ws\/session\/([0-9a-fA-F-]+)$/.exec(url.pathname);
     if (m) {
       const sessionId = m[1];
+      // Origin allowlist (defense-in-depth against drive-by browser connections).
+      if (!originAllowed(req.headers.origin, options.allowedOrigins)) {
+        warn(`Rejected session WS: origin ${req.headers.origin ?? '(none)'} not allowed`);
+        denyUpgrade(socket, '403 Forbidden');
+        return;
+      }
+      // Per-session capability token. Verified against the session BEFORE the
+      // upgrade completes so a bad/absent token never opens a socket. Also
+      // rejects unknown sessions (verifyStreamToken returns false for those).
+      if (options.requireSessionToken &&
+          !orch.verifyStreamToken(sessionId, url.searchParams.get('token'))) {
+        warn(`Rejected session WS ${sessionId.slice(0, 8)}: bad/absent stream token`);
+        denyUpgrade(socket, '401 Unauthorized');
+        return;
+      }
       wssSession.handleUpgrade(req, socket, head, (ws) => {
         wssSession.emit('connection', ws, req, sessionId);
       });
