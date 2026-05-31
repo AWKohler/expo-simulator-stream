@@ -8,6 +8,11 @@ import { attachWS } from './routes/ws.js';
 import { log } from './log.js';
 
 const PORT = parseInt(process.env.PORT ?? '8080', 10);
+// Default to loopback: the controller is reached via the tunnel (which proxies
+// to localhost) and the co-located host-agent (which dials 127.0.0.1). Binding
+// to localhost keeps the raw :8080 off the LAN/tailnet. Set BIND_HOST=0.0.0.0
+// only when the host-agent runs on a different machine than the controller.
+const BIND_HOST = process.env.BIND_HOST ?? '127.0.0.1';
 const HOST_TOKEN = process.env.HOST_TOKEN ?? 'dev-token';
 const PLATFORM_TOKEN = process.env.SIM_PLATFORM_TOKEN ?? null;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '*').split(',').map((s) => s.trim());
@@ -54,14 +59,20 @@ app.use(
 );
 
 const server = http.createServer(app);
-attachWS(server, orch, proxy, { hostToken: HOST_TOKEN });
+attachWS(server, orch, proxy, {
+  hostToken: HOST_TOKEN,
+  allowedOrigins: ALLOWED_ORIGINS,
+  // Secured mode = a platform token is configured. In that mode the browser WS
+  // also requires a per-session stream token.
+  requireSessionToken: PLATFORM_TOKEN !== null,
+});
 
-server.listen(PORT, () => {
-  log(`Controller listening on http://0.0.0.0:${PORT}`);
-  log(`  /api/sessions          — REST`);
+server.listen(PORT, BIND_HOST, () => {
+  log(`Controller listening on http://${BIND_HOST}:${PORT}`);
+  log(`  /api/sessions          — REST (token: ${PLATFORM_TOKEN ? 'required' : 'OPEN'})`);
   log(`  /api/sessions/:id/build — Build upload (token: ${PLATFORM_TOKEN ? 'required' : 'OPEN'})`);
   log(`  /ws/host               — Host Agent connection (token: ${HOST_TOKEN === 'dev-token' ? 'DEV' : 'configured'})`);
-  log(`  /ws/session/:id        — Browser stream`);
+  log(`  /ws/session/:id        — Browser stream (token: ${PLATFORM_TOKEN ? 'required' : 'OPEN'}, origins: ${ALLOWED_ORIGINS.join(',')})`);
 });
 
 const shutdown = (signal: NodeJS.Signals): void => {
