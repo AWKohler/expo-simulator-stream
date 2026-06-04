@@ -1,0 +1,18 @@
+name: CamShimTest
+options:
+  bundleIdPrefix: com.botflow.test
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  CamShimTest:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: CamShimTest
+        NSCameraUsageDescription: "Camera shim test"
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false

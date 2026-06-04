@@ -5,6 +5,18 @@ import { z } from 'zod';
 
 export const PROTOCOL_VERSION = 1;
 
+// Binary camera-frame protocol version (leading byte of every camera frame).
+// Distinct from the host→browser video-chunk version (1) so the controller can
+// tell the two binary streams apart on a shared socket.
+//
+// Reverse media channel — webcam frames flow browser → controller → host → shim.
+// Frames are raw binary (NOT JSON); JPEG payloads with a small header:
+//   Browser → Controller: [ver:u8=2][reserved:u8][timestampMs:u64 BE][jpeg…]
+//     (sessionId is implicit — the browser WS is already bound to one session)
+//   Controller → Host:     [ver:u8=2][reserved:u8][sidLen:u16 BE][timestampMs:u64 BE][sessionId utf8][jpeg…]
+//     (sessionId added so a multi-session host can route to the right shim)
+export const CAMERA_FRAME_VERSION = 2;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Common types
 // ──────────────────────────────────────────────────────────────────────────────
@@ -157,6 +169,13 @@ export const ServerStatusMsg = z.object({
   message: z.string(),
 });
 export const ServerPongMsg = z.object({ type: z.literal('pong') });
+// The app inside the simulator started/stopped its camera capture (relayed up
+// from the injected shim). The browser uses this to lazily prompt for webcam
+// permission and start/stop streaming frames.
+export const ServerCameraRequestMsg = z.object({
+  type: z.literal('camera_request'),
+  active: z.boolean(),
+});
 export const ServerBuildStatusMsg = z.object({
   type: z.literal('build_status'),
   state: z.enum(['started', 'succeeded', 'failed']),
@@ -186,6 +205,7 @@ export const ServerToBrowser = z.discriminatedUnion('type', [
   ServerErrorMsg,
   ServerStatusMsg,
   ServerPongMsg,
+  ServerCameraRequestMsg,
   ServerBuildStatusMsg,
   ServerBuildLogMsg,
   ServerBuildDiagnosticsMsg,
@@ -203,12 +223,22 @@ export const ClientCalibrationSetMsg = z.object({
 });
 export const ClientCalibrationResetMsg = z.object({ type: z.literal('reset_calibration') });
 export const ClientPingMsg = z.object({ type: z.literal('ping') });
+// Browser tells the controller whether it is (about to be) streaming webcam
+// frames. The actual frames travel as binary (see CAMERA_FRAME_VERSION); this
+// JSON control message carries the stream's on/off state + dimensions.
+export const ClientCameraStateMsg = z.object({
+  type: z.literal('camera_state'),
+  streaming: z.boolean(),
+  width: z.number().optional(),
+  height: z.number().optional(),
+});
 
 export const BrowserToServer = z.discriminatedUnion('type', [
   ClientInputMsg,
   ClientCalibrationSetMsg,
   ClientCalibrationResetMsg,
   ClientPingMsg,
+  ClientCameraStateMsg,
 ]);
 export type BrowserToServer = z.infer<typeof BrowserToServer>;
 
@@ -298,6 +328,14 @@ export const HostStatusMsg = z.object({
   level: z.enum(['info', 'warn', 'error']).default('info'),
 });
 export const HostPongMsg = z.object({ type: z.literal('pong') });
+// The injected shim connected/disconnected (i.e. the app's AVCaptureSession
+// started/stopped). The controller relays this to the browser as
+// ServerCameraRequestMsg so it can lazily prompt + start/stop the webcam.
+export const HostCameraRequestMsg = z.object({
+  type: z.literal('camera_request'),
+  sessionId: z.string(),
+  active: z.boolean(),
+});
 export const HostBuildEventMsg = z.object({
   type: z.literal('build_event'),
   sessionId: z.string(),
@@ -323,6 +361,7 @@ export const HostToController = z.discriminatedUnion('type', [
   HostVideoConfigMsg,
   HostStatusMsg,
   HostPongMsg,
+  HostCameraRequestMsg,
   HostBuildEventMsg,
 ]);
 export type HostToController = z.infer<typeof HostToController>;

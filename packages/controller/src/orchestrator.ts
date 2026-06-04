@@ -4,7 +4,7 @@
 // move the registry into a real store.
 
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { DeviceModel, HostKind, ResourceReport, SessionState } from '@sim/shared';
+import { CAMERA_FRAME_VERSION, type DeviceModel, type HostKind, type ResourceReport, type SessionState } from '@sim/shared';
 import { log, warn } from './log.js';
 
 export interface HostRecord {
@@ -18,6 +18,9 @@ export interface HostRecord {
   resources: ResourceReport;
   activeSessionIds: Set<string>;
   send: (msg: unknown) => void;
+  /** Send a raw binary frame to the host (e.g. reverse-channel webcam frames).
+   * Separate from `send`, which JSON-encodes. */
+  sendRaw: (data: Buffer) => void;
   close: () => void;
   lastHeartbeat: number;
 }
@@ -322,6 +325,31 @@ export class Orchestrator {
     const host = this.hosts.get(s.hostId);
     if (!host) return false;
     host.send(message);
+    return true;
+  }
+
+  /**
+   * Forward a webcam frame from the browser to the session's host (reverse media
+   * channel). Re-frames the browser's headerless JPEG into the controller→host
+   * binary layout with the sessionId embedded so a multi-session host can route
+   * it to the right shim. Best-effort: drops silently if no host is bound.
+   */
+  sendCameraFrameToHost(sessionId: string, timestampMs: number, jpeg: Buffer): boolean {
+    const s = this.sessions.get(sessionId);
+    if (!s || !s.hostId) return false;
+    const host = this.hosts.get(s.hostId);
+    if (!host) return false;
+    const sid = Buffer.from(sessionId, 'utf8');
+    const header = Buffer.alloc(12);
+    header.writeUInt8(CAMERA_FRAME_VERSION, 0);
+    header.writeUInt8(0, 1); // reserved
+    header.writeUInt16BE(sid.length, 2);
+    header.writeBigUInt64BE(BigInt(Math.max(0, Math.floor(timestampMs))), 4);
+    try {
+      host.sendRaw(Buffer.concat([header, sid, jpeg]));
+    } catch {
+      return false;
+    }
     return true;
   }
 

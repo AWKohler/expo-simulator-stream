@@ -280,10 +280,18 @@ async function readAppBundleId(appBundlePath: string): Promise<string | null> {
   return out.length > 0 ? out : null;
 }
 
+export interface LaunchCameraInjection {
+  /** Absolute path to the BotflowCameraShim simulator dylib. */
+  dyldPath: string;
+  /** ws://127.0.0.1:<port>/camera?session=…&token=… for the shim to dial. */
+  cameraUrl: string;
+}
+
 export async function installAndLaunch(
   udid: string,
   appBundlePath: string,
   bundleId: string,
+  camera?: LaunchCameraInjection | null,
 ): Promise<void> {
   const install = await execAsync(`xcrun simctl install ${udid} "${appBundlePath}"`, {
     timeoutMs: 60_000,
@@ -291,11 +299,20 @@ export async function installAndLaunch(
   if (install.code !== 0) {
     throw new Error(`simctl install failed: ${install.stderr || install.stdout}`);
   }
+  // `simctl launch` forwards SIMCTL_CHILD_*-prefixed env vars to the app process.
+  // We use that to inject the camera shim (DYLD_INSERT_LIBRARIES) and tell it
+  // where to dial for webcam frames — without touching the user's project.
+  const env: NodeJS.ProcessEnv | undefined = camera
+    ? {
+        SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: camera.dyldPath,
+        SIMCTL_CHILD_BOTFLOW_CAMERA_URL: camera.cameraUrl,
+      }
+    : undefined;
   // simctl launch returns immediately with PID; use --terminate-running-process so a
   // rebuild replaces the previous process cleanly.
   const launch = await execAsync(
     `xcrun simctl launch --terminate-running-process ${udid} ${bundleId}`,
-    { timeoutMs: 15_000 },
+    { timeoutMs: 15_000, env },
   );
   if (launch.code !== 0) {
     throw new Error(`simctl launch failed: ${launch.stderr || launch.stdout}`);

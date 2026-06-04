@@ -52,6 +52,10 @@ interface SessionPipe {
    * Cleared when a new build starts. */
   buildDiagnostics: BuildDiagnostic[];
   videoConfig: VideoConfigSnapshot | null;
+  /** Last camera-request state from the injected shim (true once the app's
+   * AVCaptureSession is running). Replayed to late joiners so a browser that
+   * connects after the app opened the camera still starts streaming the webcam. */
+  cameraActive: boolean;
   /** Pending GC timer fired when the last browser disconnects. */
   idleTimer: NodeJS.Timeout | null;
 }
@@ -76,6 +80,7 @@ export class SessionProxy {
         lastBuildStatus: null,
         buildDiagnostics: [],
         videoConfig: null,
+        cameraActive: false,
         idleTimer: null,
       };
       this.pipes.set(sessionId, p);
@@ -140,6 +145,9 @@ export class SessionProxy {
     if (p.lastBuildStatus) {
       send(ws, { type: 'build_status', ...p.lastBuildStatus });
     }
+    if (p.cameraActive) {
+      send(ws, { type: 'camera_request', active: true });
+    }
     send(ws, { type: 'state', state: p.state });
   }
 
@@ -203,6 +211,14 @@ export class SessionProxy {
         /* ignore individual send failure */
       }
     }
+  }
+
+  /** The injected shim's capture session started (active:true) or stopped
+   * (active:false). Relayed to browsers so they prompt + start/stop the webcam. */
+  pushCameraRequest(sessionId: string, active: boolean): void {
+    const p = this.ensure(sessionId);
+    p.cameraActive = active;
+    this.broadcast(p, { type: 'camera_request', active });
   }
 
   pushStatus(sessionId: string, message: string): void {

@@ -1,6 +1,7 @@
 import os from 'node:os';
 import { WebSocket } from 'ws';
 import {
+  CAMERA_FRAME_VERSION,
   ControllerToHost,
   type HostKind,
   type HostToController,
@@ -23,6 +24,8 @@ export interface ControllerClientOptions {
 
 export interface ControllerHandlers {
   onCommand: (cmd: ControllerToHostCmd) => void;
+  /** A reverse-channel webcam frame for the injected camera shim. */
+  onCameraFrame?: (sessionId: string, timestampMs: number, jpeg: Buffer) => void;
 }
 
 export type ControllerToHostCmd = ReturnType<typeof ControllerToHost.parse>;
@@ -96,6 +99,18 @@ export class ControllerClient {
 
     ws.on('message', (raw) => {
       const data = typeof raw === 'string' ? raw : Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer);
+      // Binary = a reverse-channel webcam frame for the camera shim. Layout:
+      // [ver][reserved][sidLen:u16][timestampMs:u64][sessionId utf8][jpeg].
+      if (Buffer.isBuffer(data) && data.length >= 12 && data[0] === CAMERA_FRAME_VERSION) {
+        const sidLen = data.readUInt16BE(2);
+        const timestampMs = Number(data.readBigUInt64BE(4));
+        if (sidLen > 0 && data.length > 12 + sidLen) {
+          const sessionId = data.subarray(12, 12 + sidLen).toString('utf8');
+          const jpeg = data.subarray(12 + sidLen);
+          this.handlers.onCameraFrame?.(sessionId, timestampMs, jpeg);
+        }
+        return;
+      }
       const cmd = safeParse(ControllerToHost, data);
       if (!cmd) {
         warn('Invalid controller message');

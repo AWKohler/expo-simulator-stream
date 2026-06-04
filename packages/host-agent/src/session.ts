@@ -34,7 +34,13 @@ import {
 import { computeScreenRect, windowNormToDeviceLogical, clampPt } from './coordinates.js';
 import { sleep } from './util.js';
 import { err, log, warn } from './log.js';
-import { BuildAborted, installAndLaunch, runBuild, type BuildHandle } from './build.js';
+import {
+  BuildAborted,
+  installAndLaunch,
+  runBuild,
+  type BuildHandle,
+  type LaunchCameraInjection,
+} from './build.js';
 import {
   probeDeviceFromScreenshot,
   startSimctlCapturer,
@@ -112,6 +118,10 @@ interface SessionEvents {
 export interface SessionInit {
   sessionId: string;
   udid: string;
+  /** When present, the app is launched with the camera shim injected so a
+   * webcam feed can be streamed into its AVCaptureSession. Null/absent on hosts
+   * without the shim dylib (camera feature off; launch proceeds normally). */
+  camera?: LaunchCameraInjection | null;
 }
 
 export interface BuildHints {
@@ -127,6 +137,7 @@ export declare interface Session {
 export class Session extends EventEmitter {
   readonly sessionId: string;
   readonly udid: string;
+  private readonly camera: LaunchCameraInjection | null;
   /**
    * Set to true by `stop()` when the post-session `simctl erase` fails. The
    * pool owner (index.ts) reads this after `stop()` resolves; if true, it
@@ -152,6 +163,7 @@ export class Session extends EventEmitter {
     super();
     this.sessionId = init.sessionId;
     this.udid = init.udid;
+    this.camera = init.camera ?? null;
   }
 
   getPhase(): SessionPhase {
@@ -336,7 +348,7 @@ export class Session extends EventEmitter {
 
     this.setPhase('installing');
     try {
-      await installAndLaunch(this.udid, result.appBundlePath, result.bundleId);
+      await installAndLaunch(this.udid, result.appBundlePath, result.bundleId, this.camera);
     } catch (e) {
       const msg = (e as Error).message;
       this.emit('build', { event: 'failed', message: msg });

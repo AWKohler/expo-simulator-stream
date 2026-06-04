@@ -6,6 +6,7 @@ import type { Server as HTTPServer, IncomingMessage } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
   BrowserToServer,
+  CAMERA_FRAME_VERSION,
   HostToController,
   safeParse,
 } from '@sim/shared';
@@ -151,6 +152,7 @@ function handleHostConnection(
         activeSessionIds: new Set(),
         lastHeartbeat: Date.now(),
         send: (m) => ws.send(JSON.stringify(m)),
+        sendRaw: (buf) => ws.send(buf, { binary: true }),
         close: () => ws.close(1000, 'host replaced'),
       };
       registeredHostRecord = record;
@@ -181,6 +183,10 @@ function handleHostConnection(
         break;
       case 'host_status':
         if (msg.sessionId) proxy.pushStatus(msg.sessionId, msg.message);
+        break;
+      case 'camera_request':
+        // Shim connected/disconnected inside the simulator → tell the browser.
+        proxy.pushCameraRequest(msg.sessionId, msg.active);
         break;
       case 'build_event':
         handleBuildEvent(orch, proxy, msg);
@@ -350,12 +356,28 @@ function handleSessionConnection(
 
   ws.on('message', (raw) => {
     const data = typeof raw === 'string' ? raw : Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer);
+    // Binary from the browser = a webcam frame (reverse media channel). Parse the
+    // headerless layout [ver][reserved][timestampMs][jpeg] and forward to the host.
+    if (Buffer.isBuffer(data) && data.length > 10 && data[0] === CAMERA_FRAME_VERSION) {
+      const timestampMs = Number(data.readBigUInt64BE(2));
+      const jpeg = data.subarray(10);
+      if (jpeg.length > 0) {
+        orch.recordActivity(sessionId);
+        orch.sendCameraFrameToHost(sessionId, timestampMs, jpeg);
+      }
+      return;
+    }
     const msg = safeParse(BrowserToServer, data);
     if (!msg) return;
     switch (msg.type) {
       case 'input':
         orch.recordActivity(sessionId);
         orch.sendToHost(sessionId, { type: 'input', sessionId, input: msg.input });
+        break;
+      case 'camera_state':
+        // Browser toggled webcam streaming on/off. Frames ride the binary path;
+        // this is just an activity ping (and a hook for future host signalling).
+        orch.recordActivity(sessionId);
         break;
       case 'set_calibration':
         orch.recordActivity(sessionId);
