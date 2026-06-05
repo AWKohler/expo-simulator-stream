@@ -34,6 +34,9 @@ export type SessionState = z.infer<typeof SessionState>;
 export const BuildPhase = z.enum(['started', 'log', 'diagnostic', 'succeeded', 'failed']);
 export type BuildPhase = z.infer<typeof BuildPhase>;
 
+export const DeviceBuildState = z.enum(['queued', 'building', 'succeeded', 'failed']);
+export type DeviceBuildState = z.infer<typeof DeviceBuildState>;
+
 export const LogStream = z.enum(['stdout', 'stderr']);
 export type LogStream = z.infer<typeof LogStream>;
 
@@ -261,6 +264,29 @@ export const SessionSummary = z.object({
 });
 export type SessionSummary = z.infer<typeof SessionSummary>;
 
+export const DeviceBuildSummary = z.object({
+  buildId: z.string(),
+  state: DeviceBuildState,
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  hostId: z.string().nullable(),
+  scheme: z.string().optional(),
+  bundleId: z.string().optional(),
+  durationMs: z.number().optional(),
+  unsigned: z.boolean().optional(),
+  diagnostics: z.array(BuildDiagnostic),
+  logs: z.array(
+    z.object({
+      line: z.string(),
+      stream: LogStream,
+      at: z.number(),
+    }),
+  ),
+  error: z.string().optional(),
+  ipaUrl: z.string().nullable(),
+});
+export type DeviceBuildSummary = z.infer<typeof DeviceBuildSummary>;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Host Agent ↔ Controller — WebSocket messages (/ws/host)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -352,6 +378,21 @@ export const HostBuildEventMsg = z.object({
   diagnostic: BuildDiagnostic.optional(),
   diagnostics: z.array(BuildDiagnostic).optional(),
 });
+export const HostDeviceBuildEventMsg = z.object({
+  type: z.literal('device_build_event'),
+  buildId: z.string(),
+  event: BuildPhase,
+  line: z.string().optional(),
+  stream: LogStream.optional(),
+  scheme: z.string().optional(),
+  bundleId: z.string().optional(),
+  durationMs: z.number().optional(),
+  message: z.string().optional(),
+  unsigned: z.boolean().optional(),
+  ipaBase64: z.string().optional(),
+  diagnostic: BuildDiagnostic.optional(),
+  diagnostics: z.array(BuildDiagnostic).optional(),
+});
 
 export const HostToController = z.discriminatedUnion('type', [
   HostHelloMsg,
@@ -363,6 +404,7 @@ export const HostToController = z.discriminatedUnion('type', [
   HostPongMsg,
   HostCameraRequestMsg,
   HostBuildEventMsg,
+  HostDeviceBuildEventMsg,
 ]);
 export type HostToController = z.infer<typeof HostToController>;
 
@@ -403,6 +445,17 @@ export const CtrlBuildSessionMsg = z.object({
     .optional(),
   isRebuild: z.boolean().optional(),
 });
+export const CtrlBuildDeviceMsg = z.object({
+  type: z.literal('build_device'),
+  buildId: z.string(),
+  tarballBase64: z.string(),
+  hints: z
+    .object({
+      scheme: z.string().optional(),
+      bundleId: z.string().optional(),
+    })
+    .optional(),
+});
 
 export const ControllerToHost = z.discriminatedUnion('type', [
   CtrlStartSessionMsg,
@@ -412,6 +465,7 @@ export const ControllerToHost = z.discriminatedUnion('type', [
   CtrlResetCalibrationMsg,
   CtrlPingMsg,
   CtrlBuildSessionMsg,
+  CtrlBuildDeviceMsg,
 ]);
 export type ControllerToHost = z.infer<typeof ControllerToHost>;
 
@@ -423,9 +477,12 @@ export type ControllerToHost = z.infer<typeof ControllerToHost>;
  * Parse a wire message string. Returns null if the payload is invalid JSON or
  * fails schema validation. Caller is expected to fall back to ignoring/logging.
  */
-export function safeParse<T extends z.ZodType>(schema: T, raw: string | Buffer): z.infer<T> | null {
+export function safeParse<T extends z.ZodType>(
+  schema: T,
+  raw: string | { toString: () => string },
+): z.infer<T> | null {
   try {
-    const text = typeof raw === 'string' ? raw : raw.toString('utf8');
+    const text = typeof raw === 'string' ? raw : raw.toString();
     const json = JSON.parse(text);
     const parsed = schema.safeParse(json);
     return parsed.success ? parsed.data : null;

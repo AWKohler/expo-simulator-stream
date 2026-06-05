@@ -4,7 +4,16 @@
 // move the registry into a real store.
 
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
-import { CAMERA_FRAME_VERSION, type DeviceModel, type HostKind, type ResourceReport, type SessionState } from '@sim/shared';
+import {
+  CAMERA_FRAME_VERSION,
+  type BuildDiagnostic,
+  type DeviceBuildState,
+  type DeviceModel,
+  type HostKind,
+  type LogStream,
+  type ResourceReport,
+  type SessionState,
+} from '@sim/shared';
 import { log, warn } from './log.js';
 
 export interface HostRecord {
@@ -55,6 +64,28 @@ export interface SessionRecord {
 
 type SessionListener = (record: Readonly<SessionRecord>) => void;
 
+export interface DeviceBuildLogLine {
+  line: string;
+  stream: LogStream;
+  at: number;
+}
+
+export interface DeviceBuildRecord {
+  buildId: string;
+  state: DeviceBuildState;
+  hostId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  scheme?: string;
+  bundleId?: string;
+  durationMs?: number;
+  unsigned?: boolean;
+  diagnostics: BuildDiagnostic[];
+  logs: DeviceBuildLogLine[];
+  error?: string;
+  ipaData?: Buffer;
+}
+
 interface PendingBuild {
   tarballBase64: string;
   hints?: { scheme?: string; bundleId?: string };
@@ -68,6 +99,12 @@ export class Orchestrator {
   // Tarballs uploaded BEFORE the session has a host attached. Replayed in
   // placeQueued() once the slot opens. Cleared when the session ends.
   private pendingBuilds = new Map<string, PendingBuild>();
+  private deviceBuilds = new Map<string, DeviceBuildRecord>();
+  private readonly deviceBuildTtlMs = parseInt(
+    process.env.DEVICE_BUILD_TTL_MS ?? '1800000',
+    10,
+  );
+  private readonly maxDeviceBuildLogs = 500;
   // Sessions for which stop_session has been sent and we're waiting for the
   // host to confirm via session_event:ended. The slot is NOT released to
   // placeQueued until confirmation arrives — preventing the "No free slots"
@@ -153,6 +190,116 @@ export class Orchestrator {
 
   listHosts(): HostRecord[] {
     return [...this.hosts.values()];
+  }
+
+  // ── Physical-device build lifecycle ───────────────────────────────────────
+  createDeviceBuild(
+    tarballBase64: string,
+    hints?: { scheme?: string; bundleId?: string },
+  ): DeviceBuildRecord {
+    const buildId = randomUUID();
+    const record: DeviceBuildRecord = {
+      buildId,
+      state: 'queued',
+      hostId: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      diagnostics: [],
+      logs: [],
+    };
+    this.deviceBuilds.set(buildId, record);
+
+    const host = this.pickDeviceBuildHost();
+    if (!host) {
+      record.state = 'failed';
+      record.error = 'No host connected for device builds.';
+      record.updatedAt = Date.now();
+      this.scheduleDeviceBuildCleanup(buildId);
+      return record;
+    }
+
+    record.hostId = host.hostId;
+    try {
+      host.send({
+        type: 'build_device',
+        buildId,
+        tarballBase64,
+        hints,
+      });
+      log(`Device build ${buildId.slice(0, 8)} queued on ${host.hostId}`);
+    } catch (e) {
+      record.state = 'failed';
+      record.error = `Failed to send build to host: ${(e as Error).message}`;
+      record.updatedAt = Date.now();
+      this.scheduleDeviceBuildCleanup(buildId);
+    }
+
+    return record;
+  }
+
+  getDeviceBuild(buildId: string): DeviceBuildRecord | null {
+    return this.deviceBuilds.get(buildId) ?? null;
+  }
+
+  getDeviceBuildArtifact(buildId: string): Buffer | null {
+    return this.deviceBuilds.get(buildId)?.ipaData ?? null;
+  }
+
+  handleDeviceBuildEvent(msg: {
+    buildId: string;
+    event: 'started' | 'log' | 'diagnostic' | 'succeeded' | 'failed';
+    line?: string;
+    stream?: LogStream;
+    scheme?: string;
+    bundleId?: string;
+    durationMs?: number;
+    message?: string;
+    unsigned?: boolean;
+    ipaBase64?: string;
+    diagnostic?: BuildDiagnostic;
+    diagnostics?: BuildDiagnostic[];
+  }): void {
+    const record = this.deviceBuilds.get(msg.buildId);
+    if (!record) return;
+    record.updatedAt = Date.now();
+
+    switch (msg.event) {
+      case 'started':
+        record.state = 'building';
+        break;
+      case 'log':
+        if (msg.line) {
+          record.logs.push({
+            line: msg.line,
+            stream: msg.stream ?? 'stdout',
+            at: Date.now(),
+          });
+          if (record.logs.length > this.maxDeviceBuildLogs) {
+            record.logs.splice(0, record.logs.length - this.maxDeviceBuildLogs);
+          }
+        }
+        break;
+      case 'diagnostic':
+        if (msg.diagnostic) record.diagnostics.push(msg.diagnostic);
+        break;
+      case 'succeeded':
+        record.state = 'succeeded';
+        record.scheme = msg.scheme;
+        record.bundleId = msg.bundleId;
+        record.durationMs = msg.durationMs;
+        record.unsigned = msg.unsigned;
+        record.diagnostics = msg.diagnostics ?? record.diagnostics;
+        if (msg.ipaBase64) record.ipaData = Buffer.from(msg.ipaBase64, 'base64');
+        this.scheduleDeviceBuildCleanup(msg.buildId);
+        break;
+      case 'failed':
+        record.state = 'failed';
+        record.error = msg.message ?? 'Device build failed.';
+        record.durationMs = msg.durationMs;
+        record.diagnostics = msg.diagnostics ?? record.diagnostics;
+        this.scheduleDeviceBuildCleanup(msg.buildId);
+        break;
+    }
   }
 
   // ── Session lifecycle ─────────────────────────────────────────────────────
@@ -476,6 +623,23 @@ export class Orchestrator {
     if (vmPick) return vmPick;
     if (this.allowBareMetalFallback) return pick((h) => h.kind === 'bare-metal');
     return null;
+  }
+
+  private pickDeviceBuildHost(): HostRecord | null {
+    let best: HostRecord | null = null;
+    for (const host of this.hosts.values()) {
+      if (!best || host.activeSessionIds.size < best.activeSessionIds.size) {
+        best = host;
+      }
+    }
+    return best;
+  }
+
+  private scheduleDeviceBuildCleanup(buildId: string): void {
+    const timer = setTimeout(() => {
+      this.deviceBuilds.delete(buildId);
+    }, this.deviceBuildTtlMs);
+    timer.unref();
   }
 
   private updateQueuePositions(): void {

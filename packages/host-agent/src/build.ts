@@ -476,7 +476,7 @@ export function runDeviceBuild(options: DeviceBuildOptions): DeviceBuildHandle {
 
     const ipaPath = path.join(workdir, `${project.scheme}.ipa`);
     const zip = await execAsync(
-      `/usr/bin/ditto -c -k --sequesterRsrc --keepParent "Payload" "${ipaPath}"`,
+      `/usr/bin/ditto -c -k --norsrc --keepParent "Payload" "${ipaPath}"`,
       { timeoutMs: 60_000, cwd: ipaRoot },
     );
     if (zip.code !== 0) {

@@ -191,6 +191,9 @@ function handleHostConnection(
       case 'build_event':
         handleBuildEvent(orch, proxy, msg);
         break;
+      case 'device_build_event':
+        orch.handleDeviceBuildEvent(msg);
+        break;
       case 'hello':
         // Duplicate hello — ignore.
         break;

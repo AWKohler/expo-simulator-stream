@@ -1,5 +1,6 @@
 import os from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { Session } from './session.js';
 import { CameraServer } from './camera-server.js';
 import {
@@ -11,6 +12,7 @@ import {
 import { detect, hasIDB, stopAllCompanions } from './idb.js';
 import { ensureCompiled } from './capturer.js';
 import { ensureFramebufferCapturer } from './framebuffer-capturer.js';
+import { runDeviceBuild } from './build.js';
 import { ControllerClient, type ControllerToHostCmd } from './controller-client.js';
 import { log, warn } from './log.js';
 
@@ -162,6 +164,9 @@ async function main(): Promise<void> {
       case 'build_session':
         void startBuild(cmd.sessionId, cmd.tarballBase64, cmd.hints);
         break;
+      case 'build_device':
+        void startDeviceBuild(cmd.buildId, cmd.tarballBase64, cmd.hints);
+        break;
       case 'input': {
         const s = sessions.get(cmd.sessionId);
         if (s) void s.handleInput(cmd.input);
@@ -219,6 +224,61 @@ async function main(): Promise<void> {
         sessionId,
         event: 'failed',
         message: (e as Error).message,
+      });
+    }
+  }
+
+  async function startDeviceBuild(
+    buildId: string,
+    tarballBase64: string,
+    hints?: { scheme?: string; bundleId?: string },
+  ): Promise<void> {
+    const startedAt = Date.now();
+    client.send({
+      type: 'device_build_event',
+      buildId,
+      event: 'started',
+    });
+
+    const tarballBuf = Buffer.from(tarballBase64, 'base64');
+    try {
+      const build = runDeviceBuild({
+        buildId,
+        tarballBuf,
+        hints,
+        onLog: (line, stream) => {
+          client.send({
+            type: 'device_build_event',
+            buildId,
+            event: 'log',
+            line,
+            stream,
+          });
+        },
+      });
+      const result = await build.done;
+      const ipaBase64 = readFileSync(result.ipaPath).toString('base64');
+      client.send({
+        type: 'device_build_event',
+        buildId,
+        event: 'succeeded',
+        scheme: result.scheme,
+        bundleId: result.bundleId,
+        durationMs: result.durationMs,
+        diagnostics: result.diagnostics,
+        unsigned: result.unsigned,
+        ipaBase64,
+      });
+    } catch (e) {
+      const error = e as Error & { diagnostics?: unknown };
+      warn(`runDeviceBuild ${buildId} threw: ${error.message}`);
+      client.send({
+        type: 'device_build_event',
+        buildId,
+        event: 'failed',
+        message: error.message,
+        durationMs: Date.now() - startedAt,
+        diagnostics: Array.isArray(error.diagnostics) ? error.diagnostics : undefined,
       });
     }
   }

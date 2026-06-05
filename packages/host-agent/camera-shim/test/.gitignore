@@ -2,3 +2,4 @@
 frames/
 app/build/
 app/*.xcodeproj/
+app/build-device/
