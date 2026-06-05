@@ -400,6 +400,12 @@ export function runDeviceBuild(options: DeviceBuildOptions): DeviceBuildHandle {
         'CODE_SIGN_IDENTITY=',
         'CODE_SIGNING_REQUIRED=NO',
         'CODE_SIGNING_ALLOWED=NO',
+        // Xcode 16 Debug builds otherwise split into a thin launcher + a
+        // <App>.debug.dylib (and __preview.dylib) that only run under Xcode's
+        // harness — installed standalone they launch then crash instantly.
+        // Disable both so the device IPA is a normal self-contained binary.
+        'ENABLE_DEBUG_DYLIB=NO',
+        'ENABLE_PREVIEWS=NO',
         'build',
       ];
       log(`device xcodebuild ${args.join(' ')}`);
