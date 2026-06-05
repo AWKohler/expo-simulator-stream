@@ -1,0 +1,4 @@
+# Generated test artifacts — not source.
+frames/
+app/build/
+app/*.xcodeproj/

@@ -9,14 +9,22 @@ export interface ExecResult {
   code: number | null;
 }
 
-export function execAsync(cmd: string, opts: { timeoutMs?: number } = {}): Promise<ExecResult> {
+export function execAsync(
+  cmd: string,
+  opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {},
+): Promise<ExecResult> {
   return new Promise((resolve) => {
-    exec(cmd, { timeout: opts.timeoutMs ?? 30_000, maxBuffer: 32 * 1024 * 1024 }, (error, stdout, stderr) => {
-      resolve({
-        stdout: stdout.toString(),
-        stderr: stderr.toString(),
-        code: error ? (error.code ?? 1) : 0,
-      });
-    });
+    const env = opts.env ? { ...process.env, ...opts.env } : process.env;
+    exec(
+      cmd,
+      { timeout: opts.timeoutMs ?? 30_000, maxBuffer: 32 * 1024 * 1024, env, cwd: opts.cwd },
+      (error, stdout, stderr) => {
+        resolve({
+          stdout: stdout.toString(),
+          stderr: stderr.toString(),
+          code: error ? (error.code ?? 1) : 0,
+        });
+      },
+    );
   });
 }

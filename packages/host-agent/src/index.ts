@@ -1,5 +1,7 @@
 import os from 'node:os';
+import { randomBytes } from 'node:crypto';
 import { Session } from './session.js';
+import { CameraServer } from './camera-server.js';
 import {
   ensurePool,
   eraseSimulator,
@@ -112,6 +114,16 @@ async function main(): Promise<void> {
   pool = pool.map((u) => remap.get(u) ?? u);
   log(`Pool cleansed on startup (${pool.length} devices erased/recreated).`);
 
+  // Loopback bridge that streams the browser webcam into the simulator's camera
+  // shim. Started before the controller connects so a session can be injected
+  // the moment it's placed.
+  const cameraServer = new CameraServer();
+  try {
+    await cameraServer.start();
+  } catch (e) {
+    warn(`Camera server failed to start (camera feature disabled): ${(e as Error).message}`);
+  }
+
   const client = new ControllerClient(
     {
       url: CONTROLLER_URL,
@@ -120,9 +132,24 @@ async function main(): Promise<void> {
       slots: HOST_SLOTS,
       kind: HOST_KIND,
     },
-    { onCommand: handleCommand },
+    {
+      onCommand: handleCommand,
+      onCameraFrame: (sessionId, timestampMs, jpeg) =>
+        cameraServer.pushFrame(sessionId, timestampMs, jpeg),
+    },
     () => [...sessions.keys()],
   );
+
+  // When the shim attaches/detaches (app started/stopped its capture session),
+  // tell the controller so it can prompt the browser to start/stop the webcam.
+  cameraServer.onCameraRequest((sessionId, active) => {
+    client.send({ type: 'camera_request', sessionId, active });
+  });
+
+  /** Mint a per-session camera token + injection config (null if no shim dylib). */
+  function prepareCamera(sessionId: string) {
+    return cameraServer.prepareInjection(sessionId, randomBytes(32).toString('base64url'));
+  }
 
   function handleCommand(cmd: ControllerToHostCmd): void {
     switch (cmd.type) {
@@ -177,7 +204,7 @@ async function main(): Promise<void> {
         });
         return;
       }
-      session = new Session({ sessionId, udid });
+      session = new Session({ sessionId, udid, camera: prepareCamera(sessionId) });
       sessions.set(sessionId, session);
       wireSessionEvents(session);
     }
@@ -277,7 +304,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    const session = new Session({ sessionId, udid });
+    const session = new Session({ sessionId, udid, camera: prepareCamera(sessionId) });
     sessions.set(sessionId, session);
     wireSessionEvents(session);
 
@@ -292,6 +319,7 @@ async function main(): Promise<void> {
         payload: { message: (e as Error).message },
       });
       sessions.delete(sessionId);
+      cameraServer.releaseSession(sessionId);
       releaseUdid(udid);
     }
   }
@@ -300,6 +328,7 @@ async function main(): Promise<void> {
     const session = sessions.get(sessionId);
     if (!session) return;
     sessions.delete(sessionId);
+    cameraServer.releaseSession(sessionId);
     const udid = session.udid;
     try {
       await session.stop();
@@ -323,6 +352,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     log(`Received ${signal}, shutting down...`);
     client.close();
+    cameraServer.stop();
     for (const session of sessions.values()) {
       await session.stop().catch(() => undefined);
     }

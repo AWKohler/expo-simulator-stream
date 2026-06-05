@@ -10,6 +10,7 @@ dist/
 .turbo/
 *.tsbuildinfo
 packages/host-agent/native/framebuffer-capturer/build/
+packages/host-agent/assets/*.dylib
 
 # Lockfiles — keep pnpm, ignore others
 *.lock

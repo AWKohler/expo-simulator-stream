@@ -20,11 +20,28 @@ export interface BuildResult {
   diagnostics: BuildDiagnostic[];
 }
 
+export interface DeviceBuildResult {
+  ipaPath: string;
+  appBundlePath: string;
+  scheme: string;
+  bundleId: string;
+  durationMs: number;
+  diagnostics: BuildDiagnostic[];
+  unsigned: true;
+}
+
 export interface BuildOptions {
   sessionId: string;
   tarballBuf: Buffer;
   hints?: Partial<ProjectInfo>;
   onLog: (line: string, stream: LogStream) => void;
+}
+
+export interface DeviceBuildOptions {
+  buildId: string;
+  tarballBuf: Buffer;
+  hints?: Partial<ProjectInfo>;
+  onLog?: (line: string, stream: LogStream) => void;
 }
 
 export class BuildAborted extends Error {
@@ -43,6 +60,11 @@ export class BuildAborted extends Error {
  */
 export interface BuildHandle {
   done: Promise<BuildResult>;
+  cancel: () => void;
+}
+
+export interface DeviceBuildHandle {
+  done: Promise<DeviceBuildResult>;
   cancel: () => void;
 }
 
@@ -264,6 +286,218 @@ export function runBuild(options: BuildOptions): BuildHandle {
 }
 
 /**
+ * Build an unsigned physical-device IPA. This is the cloud side of Botflow's
+ * local companion flow:
+ *
+ *   cloud Mac: compile Swift project for iphoneos → unsigned .ipa
+ *   user Mac: Botflow Companion signs/provisions/installs with user's Apple ID
+ *
+ * This deliberately does NOT touch simulator sessions, boot a simulator, or
+ * invoke simctl. The output is an installable IPA-shaped zip with Payload/*.app;
+ * AltSign/AltServer will replace signing assets locally before device install.
+ */
+export function runDeviceBuild(options: DeviceBuildOptions): DeviceBuildHandle {
+  const { buildId, tarballBuf, hints, onLog = () => undefined } = options;
+  const workdir = path.join(BUILDS_ROOT, `device-${buildId}`);
+  let proc: ChildProcess | null = null;
+  let cancelled = false;
+
+  const cancel = (): void => {
+    cancelled = true;
+    if (proc && !proc.killed) proc.kill('SIGTERM');
+  };
+
+  const done = (async (): Promise<DeviceBuildResult> => {
+    if (existsSync(workdir)) {
+      try {
+        rmSync(workdir, { recursive: true, force: true });
+      } catch (e) {
+        warn(`Could not clean device build workdir ${workdir}: ${(e as Error).message}`);
+      }
+    }
+    mkdirSync(workdir, { recursive: true });
+
+    await new Promise<void>((resolve, reject) => {
+      const tar = spawn('tar', ['-xzf', '-', '-C', workdir]);
+      let stderr = '';
+      tar.stderr.on('data', (d: Buffer) => {
+        stderr += d.toString();
+      });
+      tar.on('exit', (code) => {
+        if (cancelled) return reject(new BuildAborted());
+        if (code === 0) return resolve();
+        reject(new Error(`tar exited ${code}: ${stderr.trim()}`));
+      });
+      tar.on('error', reject);
+      tar.stdin.write(tarballBuf);
+      tar.stdin.end();
+    });
+
+    if (cancelled) throw new BuildAborted();
+
+    const project = parseProjectYml(workdir, hints);
+    log(`Device build: scheme=${project.scheme} bundleId=${project.bundleId}`);
+
+    const projectYmlPath = path.join(workdir, 'project.yml');
+    if (existsSync(projectYmlPath)) {
+      const probe = await execAsync('command -v xcodegen', { timeoutMs: 5_000 });
+      if (probe.code === 0 && probe.stdout.trim()) {
+        const gen = await execAsync(`cd "${workdir}" && xcodegen generate`, {
+          timeoutMs: 60_000,
+        });
+        if (gen.code !== 0) {
+          onLog(
+            `xcodegen failed (${gen.code}): ${(gen.stderr || gen.stdout).split('\n')[0]}`,
+            'stderr',
+          );
+        } else {
+          onLog('xcodegen regenerated project from project.yml', 'stdout');
+        }
+      } else {
+        onLog(
+          'project.yml present but xcodegen not installed on host — using stale .xcodeproj',
+          'stderr',
+        );
+      }
+    }
+
+    const xcodeproj = path.join(workdir, `${project.scheme}.xcodeproj`);
+    if (!existsSync(xcodeproj)) {
+      const glob = await execAsync(`ls -d "${workdir}"/*.xcodeproj 2>/dev/null | head -1`);
+      const found = glob.stdout.trim();
+      if (!found) {
+        throw new Error(
+          `No .xcodeproj found in device build workdir (expected ${project.scheme}.xcodeproj).`,
+        );
+      }
+      project.scheme = path.basename(found, '.xcodeproj');
+    }
+
+    const derivedData = path.join(workdir, 'build');
+    const resultBundlePath = path.join(workdir, 'device-result.xcresult');
+    try {
+      rmSync(resultBundlePath, { recursive: true, force: true });
+    } catch {
+      /* fine */
+    }
+
+    const startedAt = Date.now();
+    let xcExitCode: number | null = null;
+    await new Promise<void>((resolve, reject) => {
+      const args = [
+        '-project',
+        path.join(workdir, `${project.scheme}.xcodeproj`),
+        '-scheme',
+        project.scheme,
+        '-sdk',
+        'iphoneos',
+        '-destination',
+        'generic/platform=iOS',
+        '-derivedDataPath',
+        derivedData,
+        '-resultBundlePath',
+        resultBundlePath,
+        'CODE_SIGN_IDENTITY=',
+        'CODE_SIGNING_REQUIRED=NO',
+        'CODE_SIGNING_ALLOWED=NO',
+        'build',
+      ];
+      log(`device xcodebuild ${args.join(' ')}`);
+      proc = spawn('xcodebuild', args, { cwd: workdir });
+
+      const wireLineStream = (
+        readable: NodeJS.ReadableStream | null,
+        stream: LogStream,
+      ): void => {
+        if (!readable) return;
+        let buf = '';
+        const emit = (raw: string): void => {
+          const cleaned = sanitizeLine(raw, workdir);
+          if (cleaned && cleaned.length > 0) onLog(cleaned, stream);
+        };
+        readable.on('data', (chunk: Buffer) => {
+          buf += chunk.toString();
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) if (line.length > 0) emit(line);
+        });
+        readable.on('end', () => {
+          if (buf.length > 0) emit(buf);
+        });
+      };
+      wireLineStream(proc.stdout, 'stdout');
+      wireLineStream(proc.stderr, 'stderr');
+
+      proc.on('exit', (code) => {
+        xcExitCode = code;
+        if (cancelled) return reject(new BuildAborted());
+        resolve();
+      });
+      proc.on('error', reject);
+    });
+
+    const diagnostics = await extractDiagnostics(resultBundlePath, workdir);
+    if (xcExitCode !== 0) {
+      const err = new Error(`xcodebuild exited ${xcExitCode}`);
+      (err as Error & { diagnostics?: BuildDiagnostic[] }).diagnostics = diagnostics;
+      throw err;
+    }
+
+    const appBundlePath = path.join(
+      derivedData,
+      'Build/Products/Debug-iphoneos',
+      `${project.scheme}.app`,
+    );
+    if (!existsSync(appBundlePath)) {
+      throw new Error(`Device build succeeded but .app missing at ${appBundlePath}`);
+    }
+
+    const installedBundleId = await readAppBundleId(appBundlePath);
+    if (installedBundleId && installedBundleId !== project.bundleId) {
+      log(
+        `device bundleId mismatch: project.yml says ${project.bundleId}, ` +
+          `.app Info.plist says ${installedBundleId} — using ${installedBundleId}`,
+      );
+      project.bundleId = installedBundleId;
+    }
+
+    const ipaRoot = path.join(workdir, 'ipa');
+    const payloadDir = path.join(ipaRoot, 'Payload');
+    const payloadAppPath = path.join(payloadDir, `${project.scheme}.app`);
+    mkdirSync(payloadDir, { recursive: true });
+
+    const copy = await execAsync(
+      `/usr/bin/ditto "${appBundlePath}" "${payloadAppPath}"`,
+      { timeoutMs: 60_000 },
+    );
+    if (copy.code !== 0) {
+      throw new Error(`ditto app copy failed: ${copy.stderr || copy.stdout}`);
+    }
+
+    const ipaPath = path.join(workdir, `${project.scheme}.ipa`);
+    const zip = await execAsync(
+      `/usr/bin/ditto -c -k --sequesterRsrc --keepParent "Payload" "${ipaPath}"`,
+      { timeoutMs: 60_000, cwd: ipaRoot },
+    );
+    if (zip.code !== 0) {
+      throw new Error(`IPA packaging failed: ${zip.stderr || zip.stdout}`);
+    }
+
+    return {
+      ipaPath,
+      appBundlePath,
+      scheme: project.scheme,
+      bundleId: project.bundleId,
+      durationMs: Date.now() - startedAt,
+      diagnostics,
+      unsigned: true,
+    };
+  })();
+
+  return { done, cancel };
+}
+
+/**
  * Read CFBundleIdentifier from a built .app's Info.plist via `plutil`.
  * Handles both binary and XML plist formats. Returns null on any failure
  * (caller falls back to whatever bundleId it parsed from project.yml).
@@ -280,10 +514,18 @@ async function readAppBundleId(appBundlePath: string): Promise<string | null> {
   return out.length > 0 ? out : null;
 }
 
+export interface LaunchCameraInjection {
+  /** Absolute path to the BotflowCameraShim simulator dylib. */
+  dyldPath: string;
+  /** ws://127.0.0.1:<port>/camera?session=…&token=… for the shim to dial. */
+  cameraUrl: string;
+}
+
 export async function installAndLaunch(
   udid: string,
   appBundlePath: string,
   bundleId: string,
+  camera?: LaunchCameraInjection | null,
 ): Promise<void> {
   const install = await execAsync(`xcrun simctl install ${udid} "${appBundlePath}"`, {
     timeoutMs: 60_000,
@@ -291,11 +533,20 @@ export async function installAndLaunch(
   if (install.code !== 0) {
     throw new Error(`simctl install failed: ${install.stderr || install.stdout}`);
   }
+  // `simctl launch` forwards SIMCTL_CHILD_*-prefixed env vars to the app process.
+  // We use that to inject the camera shim (DYLD_INSERT_LIBRARIES) and tell it
+  // where to dial for webcam frames — without touching the user's project.
+  const env: NodeJS.ProcessEnv | undefined = camera
+    ? {
+        SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: camera.dyldPath,
+        SIMCTL_CHILD_BOTFLOW_CAMERA_URL: camera.cameraUrl,
+      }
+    : undefined;
   // simctl launch returns immediately with PID; use --terminate-running-process so a
   // rebuild replaces the previous process cleanly.
   const launch = await execAsync(
     `xcrun simctl launch --terminate-running-process ${udid} ${bundleId}`,
-    { timeoutMs: 15_000 },
+    { timeoutMs: 15_000, env },
   );
   if (launch.code !== 0) {
     throw new Error(`simctl launch failed: ${launch.stderr || launch.stdout}`);
