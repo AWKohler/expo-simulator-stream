@@ -395,7 +395,10 @@ static id BFFakeDevice(void) {
 + (AVCaptureDevice *)botflow_defaultDeviceWithDeviceType:(AVCaptureDeviceType)deviceType
                                               mediaType:(AVMediaType)mediaType
                                                position:(AVCaptureDevicePosition)position {
-  if ([mediaType isEqualToString:AVMediaTypeVideo]) return (AVCaptureDevice *)BFFakeDevice();
+  if ([mediaType isEqualToString:AVMediaTypeVideo]) {
+    BFLog(@"defaultDeviceWithDeviceType:%@ position:%ld -> fake", deviceType, (long)position);
+    return (AVCaptureDevice *)BFFakeDevice();
+  }
   return [self botflow_defaultDeviceWithDeviceType:deviceType mediaType:mediaType position:position];
 }
 + (NSArray<AVCaptureDevice *> *)botflow_devicesWithMediaType:(AVMediaType)mediaType {
@@ -403,6 +406,7 @@ static id BFFakeDevice(void) {
   return [self botflow_devicesWithMediaType:mediaType];
 }
 + (AVAuthorizationStatus)botflow_authorizationStatusForMediaType:(AVMediaType)mediaType {
+  BFLog(@"authorizationStatusForMediaType:%@ -> authorized", mediaType);
   return AVAuthorizationStatusAuthorized;
 }
 + (void)botflow_requestAccessForMediaType:(AVMediaType)mediaType
@@ -420,13 +424,23 @@ static id BFFakeDevice(void) {
 @end
 
 @implementation AVCaptureDeviceInput (BotflowShim)
+// Swift's `AVCaptureDeviceInput(device:)` calls THIS initializer, not the factory
+// below. The real init rejects our synthetic device (it's not a real
+// AVCaptureDevice), so apps doing `guard let input = try? AVCaptureDeviceInput(...)`
+// would bail. Intercept it: for the fake device, return self without running the
+// real initializer (which would fail). Our addInput: swallows it anyway.
+- (instancetype)botflow_initWithDevice:(AVCaptureDevice *)device error:(NSError **)outError {
+  if ([device isKindOfClass:[BotflowFakeDevice class]]) {
+    BFLog(@"AVCaptureDeviceInput initWithDevice: synthetic device accepted");
+    if (outError) *outError = nil;
+    return self; // already alloc'd; skip the real init that would reject the fake device
+  }
+  return [self botflow_initWithDevice:device error:outError];
+}
 + (instancetype)botflow_deviceInputWithDevice:(AVCaptureDevice *)device error:(NSError **)outError {
   if ([device isKindOfClass:[BotflowFakeDevice class]]) {
+    BFLog(@"AVCaptureDeviceInput deviceInputWithDevice: synthetic device accepted");
     if (outError) *outError = nil;
-    // A bare (uninitialized) AVCaptureDeviceInput instance — `init` is marked
-    // unavailable, and we never engage the real device anyway. Keeping it an
-    // actual AVCaptureDeviceInput means our swizzled addInput:'s isKindOfClass:
-    // check recognizes and swallows it. It's only ever held + passed to addInput:.
     return (AVCaptureDeviceInput *)[AVCaptureDeviceInput alloc];
   }
   return [self botflow_deviceInputWithDevice:device error:outError];
@@ -468,6 +482,7 @@ static id BFFakeDevice(void) {
   return layer;
 }
 - (void)botflow_setSession:(AVCaptureSession *)session {
+  BFLog(@"AVCaptureVideoPreviewLayer setSession: registering preview layer");
   [self botflow_setSession:session];
   [[BotflowFrameSource shared] registerPreviewLayer:self];
 }
@@ -523,6 +538,7 @@ static void BotflowCameraShimInit(void) {
     BFSwizzleInstance([AVCaptureDeviceDiscoverySession class], @selector(devices), @selector(botflow_devices));
 
     BFSwizzleClass([AVCaptureDeviceInput class], @selector(deviceInputWithDevice:error:), @selector(botflow_deviceInputWithDevice:error:));
+    BFSwizzleInstance([AVCaptureDeviceInput class], @selector(initWithDevice:error:), @selector(botflow_initWithDevice:error:));
 
     Class session = [AVCaptureSession class];
     BFSwizzleInstance(session, @selector(canAddInput:), @selector(botflow_canAddInput:));
