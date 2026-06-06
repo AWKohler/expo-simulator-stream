@@ -237,14 +237,24 @@ export class Session extends EventEmitter {
   async setOrientation(orientation: Orientation): Promise<void> {
     this.desiredOrientation = orientation;
     if (this.phase !== 'ready') return; // applied at next capture start
+    const before = this.currentOrientation;
     const actual = await rotateSimulator(this.udid, orientation);
     this.currentOrientation = actual;
     this.deviceLogical =
       (await probeDeviceLogicalSize(this.udid, this.scaleHint)) ?? this.deviceLogical;
-    // simctl/idb/sck stream JPEG frames that auto-adapt to the new dimensions,
-    // so no restart is needed. Only the framebuffer (H.264) decoder has fixed
-    // dims and must be restarted to re-emit a video_config.
-    if (this.activeCaptureMode === 'framebuffer' && this.framebufferCapturer) {
+    // The rotate changes the display dimensions. simctl/idb/sck stream JPEG
+    // frames that auto-adapt, but the framebuffer (H.264) path is bound to a
+    // fixed IOSurface + encoder, so restart it to pick up the new rotated
+    // surface and re-emit video_config. Only when the orientation actually
+    // changed (a failed/no-op rotate shouldn't blip the stream).
+    if (
+      actual !== before &&
+      this.activeCaptureMode === 'framebuffer' &&
+      this.framebufferCapturer
+    ) {
+      // Make sure the rotated display has rendered (new IOSurface exists) before
+      // re-probing, so FindFramebuffer doesn't race the rotation animation.
+      await this.waitForScreenReady(15_000);
       try {
         this.framebufferCapturer.stop();
       } catch {
@@ -478,14 +488,15 @@ export class Session extends EventEmitter {
     // bezel matches. With the portrait default this is a fast no-op (no rotate).
     await this.applyDesiredOrientation();
 
-    // Capture path. iPad streams via the simctl screenshot capturer: the native
-    // framebuffer capturer does not locate the iPad SimDisplay IOSurface (the
-    // session would hang waiting for a config that never comes), and simctl JPEG
-    // auto-adapts to rotation with no capturer restart. iPhone keeps the
-    // efficient framebuffer (H.264) path.
+    // Capture path. Both iPhone and iPad use the native framebuffer (H.264)
+    // capturer. iPad works too as long as the device is fully booted + rendered
+    // before we probe — the earlier "no IOSurface" failures were purely a
+    // readiness race (iPad booting during the build), now fixed by build-first +
+    // boot-alone + waitForScreenReady above. The IOSurface is the real rendered
+    // display, so it's correct on rotation (no simctl screenshot orientation
+    // quirk) and high-framerate.
     if (hasIDB()) startCompanion(this.udid);
-    const mode: CaptureMode =
-      this.deviceModel === 'iPad-Pro' ? 'simctl' : ENV_CAPTURE_MODE;
+    const mode: CaptureMode = ENV_CAPTURE_MODE;
     this.activeCaptureMode = mode;
     log(`Session ${this.sessionId.slice(0, 8)} capture mode=${mode} (${this.deviceModel}, ${this.currentOrientation})`);
     if (mode === 'framebuffer') {
