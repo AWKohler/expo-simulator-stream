@@ -5,8 +5,10 @@ import type {
   BuildDiagnostic,
   BuildPhase,
   DeviceLogical,
+  DeviceModel,
   Input,
   LogStream,
+  Orientation,
   ScreenRect,
   WindowInfo,
 } from '@sim/shared';
@@ -20,6 +22,10 @@ import {
   bootSimulator,
   probeDeviceLogicalSize,
   eraseSimulator,
+  deviceScaleFor,
+  naturalOrientation,
+  rotateSimulator,
+  getOrientation,
 } from './simulator.js';
 import {
   startCompanion,
@@ -113,11 +119,17 @@ interface SessionEvents {
   videoChunk: (chunk: FramebufferVideoChunk) => void;
   log: (message: string) => void;
   build: (payload: BuildEventPayload) => void;
+  orientation: (orientation: Orientation) => void;
 }
 
 export interface SessionInit {
   sessionId: string;
   udid: string;
+  /** Device family this slot was claimed/retyped for. Drives screen-scale
+   * (@2x iPad / @3x iPhone) and the natural default orientation. */
+  deviceModel?: DeviceModel;
+  /** Requested orientation. Absent → the device's natural default. */
+  orientation?: Orientation;
   /** When present, the app is launched with the camera shim injected so a
    * webcam feed can be streamed into its AVCaptureSession. Null/absent on hosts
    * without the shim dylib (camera feature off; launch proceeds normally). */
@@ -137,6 +149,13 @@ export declare interface Session {
 export class Session extends EventEmitter {
   readonly sessionId: string;
   readonly udid: string;
+  readonly deviceModel: DeviceModel;
+  /** Per-model screen scale used to derive logical size from screenshots. */
+  private readonly scaleHint: number;
+  /** Orientation we want the device in (requested, or the model's natural). */
+  private desiredOrientation: Orientation;
+  /** Orientation the device is actually in, as last observed/rotated. */
+  private currentOrientation: Orientation;
   private readonly camera: LaunchCameraInjection | null;
   /**
    * Set to true by `stop()` when the post-session `simctl erase` fails. The
@@ -163,6 +182,10 @@ export class Session extends EventEmitter {
     super();
     this.sessionId = init.sessionId;
     this.udid = init.udid;
+    this.deviceModel = init.deviceModel ?? 'iPhone-16-Pro';
+    this.scaleHint = deviceScaleFor(this.deviceModel);
+    this.desiredOrientation = init.orientation ?? naturalOrientation(this.deviceModel);
+    this.currentOrientation = this.desiredOrientation;
     this.camera = init.camera ?? null;
   }
 
@@ -177,6 +200,55 @@ export class Session extends EventEmitter {
   private setPhase(p: SessionPhase, payload?: SessionReadyPayload | { message: string }): void {
     this.phase = p;
     this.emit('phase', p, payload);
+  }
+
+  getOrientationState(): Orientation {
+    return this.currentOrientation;
+  }
+
+  /**
+   * Rotate the booted sim to `this.desiredOrientation` (best-effort) and report
+   * the orientation actually achieved. Called once before capture starts.
+   */
+  private async applyDesiredOrientation(): Promise<void> {
+    try {
+      const actual = await rotateSimulator(this.udid, this.desiredOrientation);
+      this.currentOrientation = actual;
+      this.emit('orientation', actual);
+    } catch (e) {
+      warn(`applyDesiredOrientation failed: ${(e as Error).message}`);
+      // Report whatever we can read so the bezel still matches.
+      const obs = await getOrientation(this.udid).catch(() => null);
+      if (obs) {
+        this.currentOrientation = obs;
+        this.emit('orientation', obs);
+      }
+    }
+  }
+
+  /**
+   * Live rotate while streaming. JPEG capture modes (sck/simctl/idb) auto-adapt
+   * to the new frame dimensions, so a rotate alone updates the stream. The
+   * framebuffer (H.264) mode has fixed decoder dims, so we restart that capturer
+   * to re-emit a fresh video_config at the rotated dimensions.
+   */
+  async setOrientation(orientation: Orientation): Promise<void> {
+    this.desiredOrientation = orientation;
+    if (this.phase !== 'ready') return; // applied at next capture start
+    const actual = await rotateSimulator(this.udid, orientation);
+    this.currentOrientation = actual;
+    this.deviceLogical =
+      (await probeDeviceLogicalSize(this.udid, this.scaleHint)) ?? this.deviceLogical;
+    if (ENV_CAPTURE_MODE === 'framebuffer' && this.framebufferCapturer) {
+      try {
+        this.framebufferCapturer.stop();
+      } catch {
+        /* ignore */
+      }
+      this.framebufferCapturer = null;
+      await this.startFramebufferCapture();
+    }
+    this.emit('orientation', actual);
   }
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -204,7 +276,8 @@ export class Session extends EventEmitter {
       return;
     }
 
-    const probed = await probeDeviceLogicalSize(this.udid);
+    await this.applyDesiredOrientation();
+    const probed = await probeDeviceLogicalSize(this.udid, this.scaleHint);
     if (probed) this.deviceLogical = probed;
     log(`Session ${this.sessionId.slice(0, 8)} device logical=${this.deviceLogical.w}x${this.deviceLogical.h}`);
 
@@ -368,6 +441,12 @@ export class Session extends EventEmitter {
       return;
     }
 
+    // Rotate the freshly-launched app to the requested orientation BEFORE
+    // capture starts, so probed/framebuffer dimensions reflect the final
+    // orientation. Best-effort: a failed rotate just leaves it portrait, which
+    // we report up so the bezel matches.
+    await this.applyDesiredOrientation();
+
     // First-time capture path — branch by mode.
     if (hasIDB()) startCompanion(this.udid);
     if (ENV_CAPTURE_MODE === 'framebuffer') {
@@ -382,7 +461,7 @@ export class Session extends EventEmitter {
   }
 
   private async startFramebufferCapture(): Promise<void> {
-    const probed = await probeDeviceFromScreenshot(this.udid);
+    const probed = await probeDeviceFromScreenshot(this.udid, this.scaleHint);
     const physical = probed?.physical ?? { w: 1179, h: 2556 };
     const logical = probed?.logical ?? { w: 393, h: 852 };
     this.deviceLogical = logical;
@@ -445,7 +524,7 @@ export class Session extends EventEmitter {
     }
 
     // Probe device dimensions so the canvas + coordinate mapping are correct.
-    const probed = await probeDeviceFromScreenshot(this.udid);
+    const probed = await probeDeviceFromScreenshot(this.udid, this.scaleHint);
     const physical = probed?.physical ?? { w: 1179, h: 2556 };
     const logical = probed?.logical ?? { w: 393, h: 852 };
     this.deviceLogical = logical;
@@ -498,7 +577,7 @@ export class Session extends EventEmitter {
       this.setPhase('error', { message: 'Could not locate simulator window after launch.' });
       return;
     }
-    const probed = await probeDeviceLogicalSize(this.udid);
+    const probed = await probeDeviceLogicalSize(this.udid, this.scaleHint);
     if (probed) this.deviceLogical = probed;
     await sleep(500);
     await this.startCaptureAtWindow(candidate.id);
@@ -507,7 +586,7 @@ export class Session extends EventEmitter {
   private async startSimctlCapture(): Promise<void> {
     // Probe device dimensions from a single screenshot so we know the canvas size
     // and frontend coordinate mapping is correct.
-    const probed = await probeDeviceFromScreenshot(this.udid);
+    const probed = await probeDeviceFromScreenshot(this.udid, this.scaleHint);
     const physical = probed?.physical ?? { w: 1179, h: 2556 };
     const logical = probed?.logical ?? { w: 393, h: 852 };
     this.deviceLogical = logical;

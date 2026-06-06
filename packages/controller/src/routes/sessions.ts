@@ -1,12 +1,13 @@
 import type { Router, Request, Response, NextFunction } from 'express';
 import express from 'express';
 import { z } from 'zod';
-import { DeviceModel, type SessionSummary } from '@sim/shared';
+import { DeviceModel, Orientation, type SessionSummary } from '@sim/shared';
 import type { Orchestrator, SessionRecord } from '../orchestrator.js';
 import { log, warn } from '../log.js';
 
 const CreateSessionBody = z.object({
   deviceModel: DeviceModel.default('iPhone-16-Pro'),
+  orientation: Orientation.optional(),
   awaitBuild: z.boolean().default(false),
 });
 
@@ -46,7 +47,11 @@ export function sessionRouter(orch: Orchestrator, options: SessionRouterOptions)
       res.status(400).json({ error: 'invalid request', details: parsed.error.format() });
       return;
     }
-    const session = orch.createSession(parsed.data.deviceModel, parsed.data.awaitBuild);
+    const session = orch.createSession(
+      parsed.data.deviceModel,
+      parsed.data.awaitBuild,
+      parsed.data.orientation,
+    );
     // streamToken is returned ONLY here (on create) so it stays out of the
     // GET/:id response surface. The caller (botflow server) appends it to the
     // browser's WS URL.
@@ -115,6 +120,7 @@ function toSummary(s: SessionRecord): SessionSummary {
     sessionId: s.sessionId,
     state: s.state,
     deviceModel: s.deviceModel,
+    orientation: s.orientation,
     queuePosition: s.queuePosition,
     createdAt: s.createdAt,
     hostId: s.hostId,

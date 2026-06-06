@@ -8,7 +8,10 @@ import {
   eraseSimulator,
   recreatePoolDevice,
   shutdownAndErasePoolDevices,
+  resolveDeviceType,
+  deviceTypeMatchesModel,
 } from './simulator.js';
+import type { DeviceModel, Orientation } from '@sim/shared';
 import { detect, hasIDB, stopAllCompanions } from './idb.js';
 import { ensureCompiled } from './capturer.js';
 import { ensureFramebufferCapturer } from './framebuffer-capturer.js';
@@ -54,16 +57,32 @@ function swapPoolUdid(oldUdid: string, newUdid: string): void {
  * Async because erase + potential recreate take real time. Returns null if
  * no slot is free, or if every recovery attempt failed.
  */
-async function claimUdid(): Promise<string | null> {
+async function claimUdid(deviceModel: DeviceModel = 'iPhone-16-Pro'): Promise<string | null> {
   for (const udid of pool) {
     if (claimedUdids.has(udid)) continue;
     claimedUdids.add(udid);
-    // Defensive erase before returning the UDID. If the prior session's
-    // cleanup erased successfully this is a fast no-op (erase of an
-    // already-erased Shutdown device returns immediately).
+
+    // Retype the slot if it isn't already the requested device family (e.g.
+    // iPhone → iPad). A recreate yields a clean device, so no separate erase
+    // is needed in that case — it subsumes the defensive wipe.
+    if (!deviceTypeMatchesModel(udid, deviceModel)) {
+      log(`claim: retyping slot ${udid.slice(0, 8)} → ${deviceModel}`);
+      const retyped = await recreatePoolDevice(udid, resolveDeviceType(deviceModel));
+      claimedUdids.delete(udid);
+      if (!retyped) {
+        warn(`claim: retype to ${deviceModel} failed for ${udid.slice(0, 8)}, dropping slot`);
+        continue;
+      }
+      swapPoolUdid(udid, retyped);
+      claimedUdids.add(retyped);
+      return retyped;
+    }
+
+    // Same family — defensive erase before returning the UDID. If the prior
+    // session's cleanup erased successfully this is a fast no-op.
     const erased = await eraseSimulator(udid);
     if (erased) return udid;
-    // Erase failed — poison-and-replace.
+    // Erase failed — poison-and-replace (keeps current device type).
     warn(`claim: erase failed for ${udid.slice(0, 8)}, recreating pool device`);
     const newUdid = await recreatePoolDevice(udid);
     claimedUdids.delete(udid);
@@ -156,14 +175,19 @@ async function main(): Promise<void> {
   function handleCommand(cmd: ControllerToHostCmd): void {
     switch (cmd.type) {
       case 'start_session':
-        void startSession(cmd.sessionId);
+        void startSession(cmd.sessionId, cmd.deviceModel, cmd.orientation);
         break;
       case 'stop_session':
         void stopSession(cmd.sessionId);
         break;
       case 'build_session':
-        void startBuild(cmd.sessionId, cmd.tarballBase64, cmd.hints);
+        void startBuild(cmd.sessionId, cmd.tarballBase64, cmd.hints, cmd.deviceModel, cmd.orientation);
         break;
+      case 'set_orientation': {
+        const s = sessions.get(cmd.sessionId);
+        if (s) void s.setOrientation(cmd.orientation);
+        break;
+      }
       case 'build_device':
         void startDeviceBuild(cmd.buildId, cmd.tarballBase64, cmd.hints);
         break;
@@ -192,14 +216,15 @@ async function main(): Promise<void> {
     sessionId: string,
     tarballBase64: string,
     hints?: { scheme?: string; bundleId?: string },
+    deviceModel: DeviceModel = 'iPhone-16-Pro',
+    orientation?: Orientation,
   ): Promise<void> {
     let session = sessions.get(sessionId);
     if (!session) {
       // First build_session for this session: create the Session lazily, claim
-      // a slot. The controller has already reserved the slot via placement.
-      // Async because claimUdid now re-erases (and possibly recreates) the
-      // device before handing it out — see swapPoolUdid / recreatePoolDevice.
-      const udid = await claimUdid();
+      // a slot of the requested device family (retyping the slot if needed).
+      // The controller has already reserved the slot via placement.
+      const udid = await claimUdid(deviceModel);
       if (!udid) {
         client.send({
           type: 'session_event',
@@ -209,7 +234,13 @@ async function main(): Promise<void> {
         });
         return;
       }
-      session = new Session({ sessionId, udid, camera: prepareCamera(sessionId) });
+      session = new Session({
+        sessionId,
+        udid,
+        deviceModel,
+        orientation,
+        camera: prepareCamera(sessionId),
+      });
       sessions.set(sessionId, session);
       wireSessionEvents(session);
     }
@@ -305,6 +336,10 @@ async function main(): Promise<void> {
       client.sendBinary(encodeHostVideoChunk(sessionId, chunk.timestampMs, chunk.keyframe, chunk.data));
     });
 
+    session.on('orientation', (orientation) => {
+      client.send({ type: 'orientation', sessionId, orientation });
+    });
+
     session.on('build', (b) => {
       client.send({
         type: 'build_event',
@@ -351,9 +386,13 @@ async function main(): Promise<void> {
     });
   }
 
-  async function startSession(sessionId: string): Promise<void> {
+  async function startSession(
+    sessionId: string,
+    deviceModel: DeviceModel = 'iPhone-16-Pro',
+    orientation?: Orientation,
+  ): Promise<void> {
     if (sessions.has(sessionId)) return;
-    const udid = await claimUdid();
+    const udid = await claimUdid(deviceModel);
     if (!udid) {
       client.send({
         type: 'session_event',
@@ -364,7 +403,13 @@ async function main(): Promise<void> {
       return;
     }
 
-    const session = new Session({ sessionId, udid, camera: prepareCamera(sessionId) });
+    const session = new Session({
+      sessionId,
+      udid,
+      deviceModel,
+      orientation,
+      camera: prepareCamera(sessionId),
+    });
     sessions.set(sessionId, session);
     wireSessionEvents(session);
 

@@ -11,6 +11,7 @@ import {
   type DeviceModel,
   type HostKind,
   type LogStream,
+  type Orientation,
   type ResourceReport,
   type SessionState,
 } from '@sim/shared';
@@ -43,6 +44,10 @@ export interface SessionRecord {
    * so a leaked/guessed sessionId is no longer sufficient to hijack a stream. */
   streamToken: string;
   deviceModel: DeviceModel;
+  /** Requested device orientation, threaded to the host at start/build. Absent
+   * → host picks the model's natural default. Updated when the host reports
+   * the live orientation after a rotate. */
+  orientation?: Orientation;
   state: SessionState;
   hostId: string | null;
   createdAt: number;
@@ -303,12 +308,17 @@ export class Orchestrator {
   }
 
   // ── Session lifecycle ─────────────────────────────────────────────────────
-  createSession(deviceModel: DeviceModel, awaitBuild = false): SessionRecord {
+  createSession(
+    deviceModel: DeviceModel,
+    awaitBuild = false,
+    orientation?: Orientation,
+  ): SessionRecord {
     const sessionId = randomUUID();
     const record: SessionRecord = {
       sessionId,
       streamToken: randomBytes(32).toString('base64url'),
       deviceModel,
+      orientation,
       state: 'queued',
       hostId: null,
       createdAt: Date.now(),
@@ -322,13 +332,19 @@ export class Orchestrator {
     this.sessions.set(sessionId, record);
     this.queue.push(sessionId);
     this.updateQueuePositions();
-    log(`Session created ${sessionId.slice(0, 8)} (${deviceModel}${awaitBuild ? ', awaitBuild' : ''})`);
+    log(`Session created ${sessionId.slice(0, 8)} (${deviceModel}${orientation ? `/${orientation}` : ''}${awaitBuild ? ', awaitBuild' : ''})`);
     this.placeQueued();
     return this.sessions.get(sessionId)!;
   }
 
   getSession(sessionId: string): SessionRecord | null {
     return this.sessions.get(sessionId) ?? null;
+  }
+
+  /** Record the orientation the host most recently reported for a session. */
+  setSessionOrientation(sessionId: string, orientation: Orientation): void {
+    const s = this.sessions.get(sessionId);
+    if (s) s.orientation = orientation;
   }
 
   /**
@@ -458,6 +474,8 @@ export class Orchestrator {
     host.send({
       type: 'build_session',
       sessionId,
+      deviceModel: s.deviceModel,
+      orientation: s.orientation,
       tarballBase64: pending.tarballBase64,
       hints: pending.hints,
     });
@@ -574,7 +592,12 @@ export class Orchestrator {
       }
 
       try {
-        host.send({ type: 'start_session', sessionId, deviceModel: s.deviceModel });
+        host.send({
+          type: 'start_session',
+          sessionId,
+          deviceModel: s.deviceModel,
+          orientation: s.orientation,
+        });
         s.hostStarted = true;
       } catch (e) {
         warn(`Failed to send start_session: ${(e as Error).message}`);

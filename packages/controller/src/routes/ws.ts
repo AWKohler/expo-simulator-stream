@@ -188,6 +188,13 @@ function handleHostConnection(
         // Shim connected/disconnected inside the simulator → tell the browser.
         proxy.pushCameraRequest(msg.sessionId, msg.active);
         break;
+      case 'orientation':
+        // Host rotated the device (at launch or via set_orientation) → tell
+        // the browser so the bezel matches the live stream. Also persist on the
+        // session record for summaries.
+        proxy.pushOrientation(msg.sessionId, msg.orientation);
+        orch.setSessionOrientation(msg.sessionId, msg.orientation);
+        break;
       case 'build_event':
         handleBuildEvent(orch, proxy, msg);
         break;
@@ -393,6 +400,14 @@ function handleSessionConnection(
       case 'reset_calibration':
         orch.recordActivity(sessionId);
         orch.sendToHost(sessionId, { type: 'reset_calibration', sessionId });
+        break;
+      case 'set_orientation':
+        orch.recordActivity(sessionId);
+        orch.sendToHost(sessionId, {
+          type: 'set_orientation',
+          sessionId,
+          orientation: msg.orientation,
+        });
         break;
       case 'ping':
         try {

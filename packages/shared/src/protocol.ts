@@ -53,8 +53,15 @@ export const BuildDiagnostic = z.object({
 });
 export type BuildDiagnostic = z.infer<typeof BuildDiagnostic>;
 
-export const DeviceModel = z.enum(['iPhone-16-Pro']);
+export const DeviceModel = z.enum(['iPhone-16-Pro', 'iPad-Pro']);
 export type DeviceModel = z.infer<typeof DeviceModel>;
+
+// Device orientation. The host achieves non-default orientations by rotating
+// the booted simulator (Device ▸ Rotate) and re-probing dimensions, so the
+// stream follows. Absent → the host picks the device's natural default
+// (iPhone: portrait, iPad: landscape).
+export const Orientation = z.enum(['portrait', 'landscape']);
+export type Orientation = z.infer<typeof Orientation>;
 
 export const WindowInfo = z.object({
   id: z.number(),
@@ -172,6 +179,12 @@ export const ServerStatusMsg = z.object({
   message: z.string(),
 });
 export const ServerPongMsg = z.object({ type: z.literal('pong') });
+// Reports the device's current orientation to the browser (on session ready
+// and after a rotate completes) so the bezel can match the live stream.
+export const ServerOrientationMsg = z.object({
+  type: z.literal('orientation'),
+  orientation: Orientation,
+});
 // The app inside the simulator started/stopped its camera capture (relayed up
 // from the injected shim). The browser uses this to lazily prompt for webcam
 // permission and start/stop streaming frames.
@@ -208,6 +221,7 @@ export const ServerToBrowser = z.discriminatedUnion('type', [
   ServerErrorMsg,
   ServerStatusMsg,
   ServerPongMsg,
+  ServerOrientationMsg,
   ServerCameraRequestMsg,
   ServerBuildStatusMsg,
   ServerBuildLogMsg,
@@ -226,6 +240,12 @@ export const ClientCalibrationSetMsg = z.object({
 });
 export const ClientCalibrationResetMsg = z.object({ type: z.literal('reset_calibration') });
 export const ClientPingMsg = z.object({ type: z.literal('ping') });
+// Browser asks the controller to rotate the device. Relayed to the host as
+// CtrlSetOrientationMsg.
+export const ClientSetOrientationMsg = z.object({
+  type: z.literal('set_orientation'),
+  orientation: Orientation,
+});
 // Browser tells the controller whether it is (about to be) streaming webcam
 // frames. The actual frames travel as binary (see CAMERA_FRAME_VERSION); this
 // JSON control message carries the stream's on/off state + dimensions.
@@ -242,6 +262,7 @@ export const BrowserToServer = z.discriminatedUnion('type', [
   ClientCalibrationResetMsg,
   ClientPingMsg,
   ClientCameraStateMsg,
+  ClientSetOrientationMsg,
 ]);
 export type BrowserToServer = z.infer<typeof BrowserToServer>;
 
@@ -251,6 +272,7 @@ export type BrowserToServer = z.infer<typeof BrowserToServer>;
 
 export const CreateSessionRequest = z.object({
   deviceModel: DeviceModel.default('iPhone-16-Pro'),
+  orientation: Orientation.optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
@@ -258,6 +280,7 @@ export const SessionSummary = z.object({
   sessionId: z.string(),
   state: SessionState,
   deviceModel: DeviceModel,
+  orientation: Orientation.optional(),
   queuePosition: z.number().nullable(),
   createdAt: z.number(),
   hostId: z.string().nullable(),
@@ -354,6 +377,13 @@ export const HostStatusMsg = z.object({
   level: z.enum(['info', 'warn', 'error']).default('info'),
 });
 export const HostPongMsg = z.object({ type: z.literal('pong') });
+// Host reports the simulator's current orientation (after boot/launch and
+// after a rotate completes). Relayed to the browser as ServerOrientationMsg.
+export const HostOrientationMsg = z.object({
+  type: z.literal('orientation'),
+  sessionId: z.string(),
+  orientation: Orientation,
+});
 // The injected shim connected/disconnected (i.e. the app's AVCaptureSession
 // started/stopped). The controller relays this to the browser as
 // ServerCameraRequestMsg so it can lazily prompt + start/stop the webcam.
@@ -402,6 +432,7 @@ export const HostToController = z.discriminatedUnion('type', [
   HostVideoConfigMsg,
   HostStatusMsg,
   HostPongMsg,
+  HostOrientationMsg,
   HostCameraRequestMsg,
   HostBuildEventMsg,
   HostDeviceBuildEventMsg,
@@ -413,6 +444,15 @@ export const CtrlStartSessionMsg = z.object({
   type: z.literal('start_session'),
   sessionId: z.string(),
   deviceModel: DeviceModel,
+  orientation: Orientation.optional(),
+});
+// Live rotate request relayed from the browser. The host rotates the booted
+// simulator, restarts capture at the new dimensions, and emits a fresh
+// video_config / orientation event so the browser re-fits.
+export const CtrlSetOrientationMsg = z.object({
+  type: z.literal('set_orientation'),
+  sessionId: z.string(),
+  orientation: Orientation,
 });
 export const CtrlStopSessionMsg = z.object({
   type: z.literal('stop_session'),
@@ -436,6 +476,7 @@ export const CtrlPingMsg = z.object({ type: z.literal('ping') });
 export const CtrlBuildSessionMsg = z.object({
   type: z.literal('build_session'),
   sessionId: z.string(),
+  deviceModel: DeviceModel.optional(),
   tarballBase64: z.string(),
   hints: z
     .object({
@@ -444,6 +485,7 @@ export const CtrlBuildSessionMsg = z.object({
     })
     .optional(),
   isRebuild: z.boolean().optional(),
+  orientation: Orientation.optional(),
 });
 export const CtrlBuildDeviceMsg = z.object({
   type: z.literal('build_device'),
@@ -466,6 +508,7 @@ export const ControllerToHost = z.discriminatedUnion('type', [
   CtrlPingMsg,
   CtrlBuildSessionMsg,
   CtrlBuildDeviceMsg,
+  CtrlSetOrientationMsg,
 ]);
 export type ControllerToHost = z.infer<typeof ControllerToHost>;
 

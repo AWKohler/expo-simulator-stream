@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import type { DeviceModel, Orientation } from '@sim/shared';
 import { execAsync, sleep } from './util.js';
 import { log, warn } from './log.js';
 
@@ -65,6 +66,75 @@ function listIOSRuntimes(): SimctlRuntime[] {
 
 const POOL_PREFIX = 'PoC-Sim-';
 const DEVICE_TYPE = 'com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro';
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Device model → simctl device type / scale / orientation
+//
+// A pool slot is created as an iPhone by default; when a session requests a
+// different model the slot is retyped (delete + recreate as the new type — see
+// index.ts claim path). iPad device-type identifiers vary by installed Xcode,
+// so we resolve the best available iPad Pro dynamically rather than hardcoding.
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface SimctlDeviceType {
+  identifier: string;
+  name: string;
+  productFamily?: string;
+}
+
+function listDeviceTypes(): SimctlDeviceType[] {
+  try {
+    const json = JSON.parse(execSync('xcrun simctl list devicetypes --json').toString()) as {
+      devicetypes: SimctlDeviceType[];
+    };
+    return json.devicetypes ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Resolve a logical DeviceModel to a concrete simctl device-type identifier. */
+export function resolveDeviceType(model: DeviceModel): string {
+  if (model !== 'iPad-Pro') return DEVICE_TYPE;
+  const ipadPros = listDeviceTypes().filter((t) => /iPad-Pro/i.test(t.identifier));
+  // Prefer the largest, newest iPad Pro: 13-inch > 12.9 > 11; higher M-gen wins.
+  const rank = (id: string): number => {
+    let s = 0;
+    if (/13-inch/i.test(id)) s += 1000;
+    else if (/12[-.]?9/i.test(id)) s += 800;
+    else if (/11-inch/i.test(id)) s += 600;
+    const m = id.match(/M(\d)/i);
+    if (m) s += parseInt(m[1], 10) * 10;
+    return s;
+  };
+  ipadPros.sort((a, b) => rank(b.identifier) - rank(a.identifier));
+  return (
+    ipadPros[0]?.identifier ??
+    'com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4-8GB'
+  );
+}
+
+/** Screen scale (points→pixels) per model: iPhone 16 Pro @3x, iPad Pro @2x. */
+export function deviceScaleFor(model: DeviceModel): number {
+  return model === 'iPad-Pro' ? 2 : 3;
+}
+
+/** Natural default orientation per model. */
+export function naturalOrientation(model: DeviceModel): Orientation {
+  return model === 'iPad-Pro' ? 'landscape' : 'portrait';
+}
+
+/** simctl device-type identifier currently backing a UDID (for retype checks). */
+export function getDeviceTypeIdentifier(udid: string): string | null {
+  const d = listSimulators().find((x) => x.udid === udid);
+  return d?.deviceTypeIdentifier ?? null;
+}
+
+/** True if the UDID's current device type matches what `model` resolves to. */
+export function deviceTypeMatchesModel(udid: string, model: DeviceModel): boolean {
+  const current = getDeviceTypeIdentifier(udid);
+  return current != null && current === resolveDeviceType(model);
+}
 
 export async function ensurePool(slots: number): Promise<string[]> {
   const existing = listSimulators().filter((d) => d.name.startsWith(POOL_PREFIX));
@@ -198,14 +268,20 @@ export async function eraseSimulator(udid: string): Promise<boolean> {
  * Used when `eraseSimulator` returns false — the device is poisoned, and we
  * trade the cost of recreating (~2s) for guaranteed tenant isolation.
  */
-export async function recreatePoolDevice(udid: string): Promise<string | null> {
+export async function recreatePoolDevice(
+  udid: string,
+  deviceType?: string,
+): Promise<string | null> {
   const existing = listSimulators().find((d) => d.udid === udid);
   if (!existing || !existing.name.startsWith(POOL_PREFIX)) {
     warn(`recreatePoolDevice: ${udid.slice(0, 8)} is not a pool device — refusing`);
     return null;
   }
   const name = existing.name;
-  log(`Recreating poisoned pool device ${name} (${udid.slice(0, 8)})...`);
+  // Poison-recreate preserves the slot's current type; retype passes an explicit
+  // deviceType to switch the slot (e.g. iPhone → iPad) for the next tenant.
+  const targetType = deviceType ?? existing.deviceTypeIdentifier ?? DEVICE_TYPE;
+  log(`Recreating pool device ${name} (${udid.slice(0, 8)}) as ${targetType.split('.').pop()}...`);
   // Best-effort shutdown — `simctl delete` of a Booted device may hang.
   await shutdownSimulator(udid);
   const delRes = await execAsync(`xcrun simctl delete ${udid}`, { timeoutMs: 30_000 });
@@ -217,7 +293,7 @@ export async function recreatePoolDevice(udid: string): Promise<string | null> {
   if (runtimes.length === 0) return null;
   runtimes.sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
   const createRes = await execAsync(
-    `xcrun simctl create "${name}" "${DEVICE_TYPE}" "${runtimes[0].identifier}"`,
+    `xcrun simctl create "${name}" "${targetType}" "${runtimes[0].identifier}"`,
   );
   if (createRes.code !== 0) {
     warn(`recreate ${name} failed: ${(createRes.stderr || createRes.stdout).split('\n')[0]}`);
@@ -263,6 +339,7 @@ export async function shutdownAndErasePoolDevices(): Promise<Map<string, string>
 
 export async function probeDeviceLogicalSize(
   udid: string,
+  scaleHint?: number,
 ): Promise<{ w: number; h: number } | null> {
   const tmp = path.join(tmpdir(), `expo_probe_${udid}.jpg`);
   const screenshot = await execAsync(`xcrun simctl io ${udid} screenshot --type=jpeg "${tmp}"`);
@@ -272,7 +349,57 @@ export async function probeDeviceLogicalSize(
   const w = parseInt(sips.stdout.match(/pixelWidth: (\d+)/)?.[1] ?? '0');
   const h = parseInt(sips.stdout.match(/pixelHeight: (\d+)/)?.[1] ?? '0');
   if (!w || !h) return null;
-  // iPhone 16 Pro: 1179×2556 physical → 393×852 logical (@3x)
-  const scale = Math.round(w / 393);
+  // scaleHint = device @Nx (iPhone 16 Pro @3x, iPad Pro @2x). Without a hint,
+  // fall back to the iPhone 16 Pro assumption (1179×2556 → 393×852 @3x).
+  const scale = scaleHint ?? Math.max(1, Math.round(w / 393));
   return { w: Math.round(w / scale), h: Math.round(h / scale) };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Orientation — detection + best-effort rotation
+//
+// simctl has no rotate verb, so we drive the Simulator.app "Rotate Right"
+// shortcut (⌘→) via osascript and poll the screenshot aspect ratio until it
+// matches the target. This requires Accessibility permission for the process
+// sending the key event; if that's not granted the rotate is a no-op and the
+// caller falls back to the device's current orientation (reported up the chain
+// so the bezel still matches the real stream). Single focused-window
+// assumption — fine for the 1–2 slot hosts we run.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export async function getOrientation(udid: string): Promise<Orientation | null> {
+  const tmp = path.join(tmpdir(), `expo_orient_${udid}.jpg`);
+  const shot = await execAsync(`xcrun simctl io ${udid} screenshot --type=jpeg "${tmp}"`);
+  if (shot.code !== 0) return null;
+  const sips = await execAsync(`sips -g pixelWidth -g pixelHeight "${tmp}"`);
+  if (sips.code !== 0) return null;
+  const w = parseInt(sips.stdout.match(/pixelWidth: (\d+)/)?.[1] ?? '0');
+  const h = parseInt(sips.stdout.match(/pixelHeight: (\d+)/)?.[1] ?? '0');
+  if (!w || !h) return null;
+  return w > h ? 'landscape' : 'portrait';
+}
+
+export async function rotateSimulator(
+  udid: string,
+  target: Orientation,
+): Promise<Orientation> {
+  // Up to 4 quarter-turns to reach the target aspect.
+  for (let i = 0; i < 4; i++) {
+    const cur = await getOrientation(udid);
+    if (cur === target) return cur;
+    if (cur == null) break;
+    // key code 124 = Right Arrow → ⌘→ = "Rotate Right" in Simulator.app.
+    const res = await execAsync(
+      `osascript -e 'tell application "Simulator" to activate' ` +
+        `-e 'delay 0.2' ` +
+        `-e 'tell application "System Events" to key code 124 using command down'`,
+      { timeoutMs: 8_000 },
+    );
+    if (res.code !== 0) {
+      warn(`rotateSimulator: osascript failed (Accessibility not granted?): ${(res.stderr || res.stdout).split('\n')[0]}`);
+      break;
+    }
+    await sleep(900);
+  }
+  return (await getOrientation(udid)) ?? target;
 }

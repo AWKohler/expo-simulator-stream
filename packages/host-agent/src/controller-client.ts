@@ -79,7 +79,7 @@ export class ControllerClient {
         hostToken: this.opts.hostToken,
         capacity: {
           slots: this.opts.slots,
-          deviceModels: ['iPhone-16-Pro'],
+          deviceModels: ['iPhone-16-Pro', 'iPad-Pro'],
           kind: this.opts.kind,
         },
         resources: collectResources(),

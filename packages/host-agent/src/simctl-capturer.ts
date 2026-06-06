@@ -169,13 +169,15 @@ function captureOne(udid: string): Promise<Buffer> {
  */
 export async function probeDeviceFromScreenshot(
   udid: string,
+  scaleHint?: number,
 ): Promise<{ logical: { w: number; h: number }; physical: { w: number; h: number } } | null> {
   try {
     const buf = await captureOne(udid);
     const dims = readJpegDimensions(buf);
     if (!dims) return null;
-    // iPhone 16 Pro: 1179x2556 physical → 393x852 logical (@3x).
-    const scale = Math.max(1, Math.round(dims.w / 393));
+    // scaleHint = device @Nx (iPhone 16 Pro @3x, iPad Pro @2x). Without a hint,
+    // fall back to the iPhone 16 Pro assumption (1179x2556 → 393x852 @3x).
+    const scale = scaleHint ?? Math.max(1, Math.round(dims.w / 393));
     return {
       physical: dims,
       logical: { w: Math.round(dims.w / scale), h: Math.round(dims.h / scale) },

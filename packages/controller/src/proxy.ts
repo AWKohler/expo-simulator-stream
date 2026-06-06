@@ -5,6 +5,7 @@
 import type { WebSocket } from 'ws';
 import type {
   BuildDiagnostic,
+  Orientation,
   ScreenRect,
   ServerToBrowser,
   WindowInfo,
@@ -56,6 +57,9 @@ interface SessionPipe {
    * AVCaptureSession is running). Replayed to late joiners so a browser that
    * connects after the app opened the camera still starts streaming the webcam. */
   cameraActive: boolean;
+  /** Last orientation the host reported. Replayed to late joiners so the bezel
+   * matches the live stream immediately on (re)connect. */
+  orientation: Orientation | null;
   /** Pending GC timer fired when the last browser disconnects. */
   idleTimer: NodeJS.Timeout | null;
 }
@@ -81,6 +85,7 @@ export class SessionProxy {
         buildDiagnostics: [],
         videoConfig: null,
         cameraActive: false,
+        orientation: null,
         idleTimer: null,
       };
       this.pipes.set(sessionId, p);
@@ -147,6 +152,9 @@ export class SessionProxy {
     }
     if (p.cameraActive) {
       send(ws, { type: 'camera_request', active: true });
+    }
+    if (p.orientation) {
+      send(ws, { type: 'orientation', orientation: p.orientation });
     }
     send(ws, { type: 'state', state: p.state });
   }
@@ -225,6 +233,12 @@ export class SessionProxy {
     const p = this.pipes.get(sessionId);
     if (!p) return;
     this.broadcast(p, { type: 'status', message });
+  }
+
+  pushOrientation(sessionId: string, orientation: Orientation): void {
+    const p = this.ensure(sessionId);
+    p.orientation = orientation;
+    this.broadcast(p, { type: 'orientation', orientation });
   }
 
   pushError(sessionId: string, message: string): void {
