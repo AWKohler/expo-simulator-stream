@@ -119,9 +119,11 @@ export function deviceScaleFor(model: DeviceModel): number {
   return model === 'iPad-Pro' ? 2 : 3;
 }
 
-/** Natural default orientation per model. */
-export function naturalOrientation(model: DeviceModel): Orientation {
-  return model === 'iPad-Pro' ? 'landscape' : 'portrait';
+/** Default orientation per model when the request doesn't specify one. Both
+ * boot in portrait; landscape is reached only by an explicit rotate so a
+ * session never blocks on rotation just to come up. */
+export function naturalOrientation(_model: DeviceModel): Orientation {
+  return 'portrait';
 }
 
 /** simctl device-type identifier currently backing a UDID (for retype checks). */
@@ -383,17 +385,21 @@ export async function rotateSimulator(
   udid: string,
   target: Orientation,
 ): Promise<Orientation> {
-  // Up to 4 quarter-turns to reach the target aspect.
-  for (let i = 0; i < 4; i++) {
+  // Up to 3 quarter-turns to reach the target aspect. Bounded so a session
+  // never stalls on rotation: on the first osascript failure we bail and report
+  // the current orientation (the stream still comes up, just unrotated).
+  for (let i = 0; i < 3; i++) {
     const cur = await getOrientation(udid);
     if (cur === target) return cur;
     if (cur == null) break;
     // key code 124 = Right Arrow → ⌘→ = "Rotate Right" in Simulator.app.
+    // Needs Accessibility permission for the host-agent's process; without it
+    // this errors out fast (handled below) instead of rotating.
     const res = await execAsync(
       `osascript -e 'tell application "Simulator" to activate' ` +
         `-e 'delay 0.2' ` +
         `-e 'tell application "System Events" to key code 124 using command down'`,
-      { timeoutMs: 8_000 },
+      { timeoutMs: 5_000 },
     );
     if (res.code !== 0) {
       warn(`rotateSimulator: osascript failed (Accessibility not granted?): ${(res.stderr || res.stdout).split('\n')[0]}`);

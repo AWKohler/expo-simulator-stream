@@ -177,6 +177,8 @@ export class Session extends EventEmitter {
   private simctlCapturer: SimctlCapturerHandle | null = null;
   private idbCapturer: IdbVideoStreamHandle | null = null;
   private framebufferCapturer: FramebufferCapturerHandle | null = null;
+  /** Capture mode actually chosen for this session (iPad forces simctl). */
+  private activeCaptureMode: CaptureMode = ENV_CAPTURE_MODE;
 
   constructor(init: SessionInit) {
     super();
@@ -239,7 +241,10 @@ export class Session extends EventEmitter {
     this.currentOrientation = actual;
     this.deviceLogical =
       (await probeDeviceLogicalSize(this.udid, this.scaleHint)) ?? this.deviceLogical;
-    if (ENV_CAPTURE_MODE === 'framebuffer' && this.framebufferCapturer) {
+    // simctl/idb/sck stream JPEG frames that auto-adapt to the new dimensions,
+    // so no restart is needed. Only the framebuffer (H.264) decoder has fixed
+    // dims and must be restarted to re-emit a video_config.
+    if (this.activeCaptureMode === 'framebuffer' && this.framebufferCapturer) {
       try {
         this.framebufferCapturer.stop();
       } catch {
@@ -441,19 +446,27 @@ export class Session extends EventEmitter {
       return;
     }
 
-    // Rotate the freshly-launched app to the requested orientation BEFORE
-    // capture starts, so probed/framebuffer dimensions reflect the final
-    // orientation. Best-effort: a failed rotate just leaves it portrait, which
-    // we report up so the bezel matches.
+    // Best-effort rotation to the requested orientation BEFORE capture, so the
+    // probe sees the final dimensions. Bounded + non-fatal: a failed/blocked
+    // rotate leaves the device in its boot orientation, which we report so the
+    // bezel matches. With the portrait default this is a fast no-op (no rotate).
     await this.applyDesiredOrientation();
 
-    // First-time capture path — branch by mode.
+    // Capture path. iPad streams via the simctl screenshot capturer: the native
+    // framebuffer capturer does not locate the iPad SimDisplay IOSurface (the
+    // session would hang waiting for a config that never comes), and simctl JPEG
+    // auto-adapts to rotation with no capturer restart. iPhone keeps the
+    // efficient framebuffer (H.264) path.
     if (hasIDB()) startCompanion(this.udid);
-    if (ENV_CAPTURE_MODE === 'framebuffer') {
+    const mode: CaptureMode =
+      this.deviceModel === 'iPad-Pro' ? 'simctl' : ENV_CAPTURE_MODE;
+    this.activeCaptureMode = mode;
+    log(`Session ${this.sessionId.slice(0, 8)} capture mode=${mode} (${this.deviceModel}, ${this.currentOrientation})`);
+    if (mode === 'framebuffer') {
       await this.startFramebufferCapture();
-    } else if (ENV_CAPTURE_MODE === 'idb') {
+    } else if (mode === 'idb') {
       await this.startIdbCapture();
-    } else if (ENV_CAPTURE_MODE === 'simctl') {
+    } else if (mode === 'simctl') {
       await this.startSimctlCapture();
     } else {
       await this.startSckCaptureAfterLaunch();
@@ -469,6 +482,15 @@ export class Session extends EventEmitter {
     this.screenRect = { left: 0, top: 0, right: physical.w, bottom: physical.h };
 
     let gotConfig = false;
+    // Watchdog: if the native capturer never locates the SimDisplay IOSurface
+    // (no onConfig), error out so the slot is released rather than leaking a
+    // stuck session that wedges the queue.
+    const configWatchdog = setTimeout(() => {
+      if (!gotConfig && this.phase !== 'ending' && this.phase !== 'ended' && this.phase !== 'ready') {
+        err(`framebuffer capturer: no video_config within 45s — failing session`);
+        this.setPhase('error', { message: 'Capture did not start (no framebuffer surface).' });
+      }
+    }, 45_000);
     this.framebufferCapturer = startFramebufferCapturer(
       {
         udid: this.udid,
@@ -479,6 +501,7 @@ export class Session extends EventEmitter {
       {
         onConfig: (config) => {
           gotConfig = true;
+          clearTimeout(configWatchdog);
           this.windowInfo = { id: 0, x: 0, y: 0, w: config.width, h: config.height, scale: 1 };
           this.screenRect = { left: 0, top: 0, right: config.width, bottom: config.height };
           this.emit('videoConfig', config);
