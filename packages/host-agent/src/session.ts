@@ -360,10 +360,17 @@ export class Session extends EventEmitter {
       this.currentBuild = null;
     }
 
-    // Kick off sim boot in parallel with the build — boot takes 8-15s, build takes
-    // 30-60s, so the boot is almost always done by the time we need it.
+    // Boot strategy, tuned for a memory-constrained host (8GB):
+    //  • iPhone: boot in parallel with the build (light device, proven fast).
+    //  • iPad: the 13" sim is heavy. Booting it *during* xcodebuild thrashes RAM
+    //    (build crawls) and starves the display-surface ("screen surfaces
+    //    timeout"). So we build FIRST with no sim running (fast), then boot the
+    //    iPad ALONE afterwards so it gets its surface cleanly. See the post-build
+    //    boot below.
     const isFirstBuild = this.phase === 'idle' || this.phase === 'building';
-    const bootTask = isFirstBuild ? this.bootInParallel() : Promise.resolve(true);
+    const deferBoot = isFirstBuild && this.deviceModel === 'iPad-Pro';
+    const bootTask =
+      isFirstBuild && !deferBoot ? this.bootInParallel() : Promise.resolve(true);
 
     this.setPhase('building');
     this.emit('build', { event: 'started' });
@@ -417,7 +424,13 @@ export class Session extends EventEmitter {
     });
 
     if (isFirstBuild) {
-      const booted = await bootTask;
+      // iPad: now that the build is done (and no sim was competing for RAM),
+      // boot the heavy device alone so it allocates its display surface cleanly.
+      // iPhone: just await the parallel boot started earlier.
+      this.setPhase('booting');
+      const booted = deferBoot
+        ? await bootSimulator(this.udid, 180_000)
+        : await bootTask;
       if (!booted) {
         this.setPhase('error', { message: 'Simulator boot timed out.' });
         return;
@@ -446,6 +459,19 @@ export class Session extends EventEmitter {
       return;
     }
 
+    // The heavy iPad display surface can lag behind app launch on a constrained
+    // host. Wait until a screenshot actually succeeds before starting capture,
+    // so we don't hammer (and give up on) "Timeout waiting for screen surfaces".
+    if (this.deviceModel === 'iPad-Pro') {
+      const ready = await this.waitForScreenReady(90_000);
+      if (!ready) {
+        this.setPhase('error', {
+          message: 'iPad display surface never became ready (host may be low on memory).',
+        });
+        return;
+      }
+    }
+
     // Best-effort rotation to the requested orientation BEFORE capture, so the
     // probe sees the final dimensions. Bounded + non-fatal: a failed/blocked
     // rotate leaves the device in its boot orientation, which we report so the
@@ -471,6 +497,27 @@ export class Session extends EventEmitter {
     } else {
       await this.startSckCaptureAfterLaunch();
     }
+  }
+
+  /**
+   * Poll a screenshot until the device's display surface is up. simctl returns
+   * "Timeout waiting for screen surfaces" until the booted device has rendered
+   * its first frame — heavy iPad displays on a constrained host can take a while
+   * after launch. Returns false if it never becomes ready within the budget.
+   */
+  private async waitForScreenReady(timeoutMs: number): Promise<boolean> {
+    const start = Date.now();
+    let attempt = 0;
+    while (Date.now() - start < timeoutMs) {
+      const probed = await probeDeviceFromScreenshot(this.udid, this.scaleHint);
+      if (probed) {
+        log(`Session ${this.sessionId.slice(0, 8)} screen ready after ${attempt + 1} probe(s)`);
+        return true;
+      }
+      attempt++;
+      await sleep(2000);
+    }
+    return false;
   }
 
   private async startFramebufferCapture(): Promise<void> {
