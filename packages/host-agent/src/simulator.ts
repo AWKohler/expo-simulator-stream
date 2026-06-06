@@ -1,4 +1,5 @@
 import { execSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { DeviceModel, Orientation } from '@sim/shared';
@@ -130,6 +131,12 @@ export function naturalOrientation(_model: DeviceModel): Orientation {
 export function getDeviceTypeIdentifier(udid: string): string | null {
   const d = listSimulators().find((x) => x.udid === udid);
   return d?.deviceTypeIdentifier ?? null;
+}
+
+/** Device name (e.g. "PoC-Sim-0") — used to target the right Simulator window. */
+export function getDeviceName(udid: string): string | null {
+  const d = listSimulators().find((x) => x.udid === udid);
+  return d?.name ?? null;
 }
 
 /** True if the UDID's current device type matches what `model` resolves to. */
@@ -385,6 +392,27 @@ export async function rotateSimulator(
   udid: string,
   target: Orientation,
 ): Promise<Orientation> {
+  // Target THIS device's Simulator window by its name (e.g. "PoC-Sim-0") before
+  // sending the keystroke — otherwise the rotate lands on whatever window is
+  // focused, which with multiple slots is the wrong device.
+  const name = getDeviceName(udid) ?? '';
+  const scriptPath = path.join(tmpdir(), `bf_rotate_${udid}.scpt`);
+  const script = [
+    'tell application "Simulator" to activate',
+    'delay 0.2',
+    'tell application "System Events"',
+    '  tell process "Simulator"',
+    '    set frontmost to true',
+    '    try',
+    `      perform action "AXRaise" of (first window whose name contains "${name}")`,
+    '    end try',
+    '  end tell',
+    '  delay 0.25',
+    '  key code 124 using command down', // ⌘→ = Rotate Right
+    'end tell',
+  ].join('\n');
+  writeFileSync(scriptPath, script);
+
   // Up to 3 quarter-turns to reach the target aspect. Bounded so a session
   // never stalls on rotation: on the first osascript failure we bail and report
   // the current orientation (the stream still comes up, just unrotated).
@@ -392,15 +420,9 @@ export async function rotateSimulator(
     const cur = await getOrientation(udid);
     if (cur === target) return cur;
     if (cur == null) break;
-    // key code 124 = Right Arrow → ⌘→ = "Rotate Right" in Simulator.app.
     // Needs Accessibility permission for the host-agent's process; without it
     // this errors out fast (handled below) instead of rotating.
-    const res = await execAsync(
-      `osascript -e 'tell application "Simulator" to activate' ` +
-        `-e 'delay 0.2' ` +
-        `-e 'tell application "System Events" to key code 124 using command down'`,
-      { timeoutMs: 5_000 },
-    );
+    const res = await execAsync(`osascript "${scriptPath}"`, { timeoutMs: 6_000 });
     if (res.code !== 0) {
       warn(`rotateSimulator: osascript failed (Accessibility not granted?): ${(res.stderr || res.stdout).split('\n')[0]}`);
       break;
