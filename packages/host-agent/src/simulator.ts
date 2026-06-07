@@ -4,7 +4,6 @@ import path from 'node:path';
 import type { DeviceModel, Orientation } from '@sim/shared';
 import { execAsync, sleep } from './util.js';
 import { log, warn } from './log.js';
-import { postOrientation } from './notifypost.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // simctl JSON types
@@ -391,28 +390,52 @@ export async function rotateSimulator(
   udid: string,
   target: Orientation,
 ): Promise<Orientation> {
-  // TCC-free, deterministic rotation. We post a Darwin notification into the
-  // guest's notify namespace via `simctl spawn notifypost`; the running Botflow
-  // template app receives it (BotflowPreviewOrientation observer) and rotates
-  // itself with the public requestGeometryUpdate API. No Accessibility, no GUI
-  // automation, no helper .app — and because the APP relayouts, the live
-  // IOSurface changes dimensions so the H.264 stream becomes landscape on its
-  // own (the framebuffer capturer is restarted by Session.setOrientation).
-  //
-  // Requirements (both satisfied by our templates): the app must allow the
-  // target orientation and set UIRequiresFullScreen=YES (so iPadOS doesn't
-  // reject the geometry change in windowed mode).
-  const posted = await postOrientation(udid, target);
-  if (!posted) {
-    warn(`rotateSimulator: notifypost failed for ${udid} -> ${target}`);
-    return (await getOrientation(udid)) ?? target;
-  }
-  // The geometry update lands in ~tens of ms; give it a moment, then report the
-  // observed orientation. (Detection via simctl screenshot dims lags briefly,
-  // so the authoritative signal downstream is the framebuffer surface size.)
-  for (let p = 0; p < 4; p++) {
-    await sleep(400);
+  // Rotate the DEVICE (not just the app interface). Forcing the app's interface
+  // orientation (requestGeometryUpdate) only spins the app's view inside a
+  // still-portrait device surface — the framebuffer stays portrait and content
+  // renders sideways. The Simulator's "Device ▸ Orientation" menu rotates the
+  // actual device: the IOSurface is reallocated at the new dims and the app
+  // relayouts upright (it must allow the orientation — guaranteed by the
+  // build.ts plist overrides). We drive that menu via osascript, which runs
+  // under the host-agent's `node` (granted Accessibility once on the host — a
+  // stable binary, so the grant sticks; no per-app prompts).
+  const name = (getDeviceName(udid) ?? '').replace(/["\\]/g, '');
+  const orientItem = target === 'landscape' ? 'Landscape Right' : 'Portrait';
+  const osa = [
+    'tell application "Simulator" to activate',
+    'delay 0.2',
+    'tell application "System Events" to tell process "Simulator"',
+    '  set frontmost to true',
+    '  try',
+    `    perform action "AXRaise" of (first window whose name contains "${name}")`,
+    '  end try',
+    '  delay 0.15',
+    '  set dmenu to menu 1 of menu bar item "Device" of menu bar 1',
+    // "Rotate Device Automatically" being ON makes the sim (no accelerometer)
+    // ignore an explicit orientation and snap back — turn it off first.
+    '  try',
+    '    if (value of attribute "AXMenuItemMarkChar" of (menu item "Rotate Device Automatically" of dmenu)) is not "" then',
+    '      click menu item "Rotate Device Automatically" of dmenu',
+    '      delay 0.2',
+    '    end if',
+    '  end try',
+    `  click menu item "${orientItem}" of menu 1 of menu item "Orientation" of dmenu`,
+    'end tell',
+  ].join('\n');
+  const cmd = `osascript -e '${osa.replace(/'/g, "'\\''")}'`;
+  for (let attempt = 0; attempt < 2; attempt++) {
     if ((await getOrientation(udid)) === target) return target;
+    const res = await execAsync(cmd, { timeoutMs: 8_000 });
+    if (res.code !== 0) {
+      warn(`rotateSimulator: osascript exit ${res.code}: ${(res.stderr || res.stdout).split('\n')[0]}`);
+      break;
+    }
+    // The device rotation (surface realloc + relayout) settles in ~1s; poll the
+    // screenshot aspect, which DOES flip for a real device rotation.
+    for (let p = 0; p < 6; p++) {
+      await sleep(800);
+      if ((await getOrientation(udid)) === target) return target;
+    }
   }
-  return target;
+  return (await getOrientation(udid)) ?? target;
 }
