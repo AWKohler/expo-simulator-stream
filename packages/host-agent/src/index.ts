@@ -15,6 +15,7 @@ import type { DeviceModel, Orientation } from '@sim/shared';
 import { detect, hasIDB, stopAllCompanions } from './idb.js';
 import { ensureCompiled } from './capturer.js';
 import { ensureFramebufferCapturer } from './framebuffer-capturer.js';
+import { ensureRotator } from './rotator.js';
 import { runDeviceBuild } from './build.js';
 import { ControllerClient, type ControllerToHostCmd } from './controller-client.js';
 import { log, warn } from './log.js';
@@ -120,6 +121,13 @@ async function main(): Promise<void> {
     } catch (e) {
       warn(`Native framebuffer capturer unavailable: ${(e as Error).message}`);
     }
+  }
+  // Build the signed rotation helper (BotflowRotator.app). Device rotation needs
+  // it to be granted Accessibility once; without the grant, rotate is a no-op.
+  try {
+    await ensureRotator();
+  } catch (e) {
+    warn(`BotflowRotator build failed: ${(e as Error).message}`);
   }
 
   log(`Ensuring simulator pool of ${HOST_SLOTS} iPhone 16 Pro devices...`);

@@ -1,9 +1,9 @@
 import { execSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { DeviceModel, Orientation } from '@sim/shared';
 import { execAsync, sleep } from './util.js';
+import { ROTATOR_BIN } from './rotator.js';
 import { log, warn } from './log.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -392,42 +392,24 @@ export async function rotateSimulator(
   udid: string,
   target: Orientation,
 ): Promise<Orientation> {
-  // Target THIS device's Simulator window by its name (e.g. "PoC-Sim-0") before
-  // sending the keystroke — otherwise the rotate lands on whatever window is
-  // focused, which with multiple slots is the wrong device.
+  // Real *device* rotation (gives a correctly-sized landscape framebuffer) is a
+  // GUI action (⌘→ in Simulator) that needs Accessibility. The host's `node`
+  // can't be granted that, so we delegate to BotflowRotator.app — a signed .app
+  // bundle that macOS *can* grant Accessibility to. It targets this device's
+  // window by name and rotates one quarter-turn; we poll the screenshot aspect
+  // and repeat until the target orientation is reached.
   const name = getDeviceName(udid) ?? '';
-  const scriptPath = path.join(tmpdir(), `bf_rotate_${udid}.scpt`);
-  const script = [
-    'tell application "Simulator" to activate',
-    'delay 0.2',
-    'tell application "System Events"',
-    '  tell process "Simulator"',
-    '    set frontmost to true',
-    '    try',
-    `      perform action "AXRaise" of (first window whose name contains "${name}")`,
-    '    end try',
-    '  end tell',
-    '  delay 0.25',
-    '  key code 124 using command down', // ⌘→ = Rotate Right
-    'end tell',
-  ].join('\n');
-  writeFileSync(scriptPath, script);
-
-  // Up to 3 quarter-turns to reach the target aspect. Bounded so a session
-  // never stalls on rotation: on the first osascript failure we bail and report
-  // the current orientation (the stream still comes up, just unrotated).
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 4; i++) {
     const cur = await getOrientation(udid);
     if (cur === target) return cur;
     if (cur == null) break;
-    // Needs Accessibility permission for the host-agent's process; without it
-    // this errors out fast (handled below) instead of rotating.
-    const res = await execAsync(`osascript "${scriptPath}"`, { timeoutMs: 6_000 });
+    const res = await execAsync(`"${ROTATOR_BIN}" "${name}"`, { timeoutMs: 8_000 });
     if (res.code !== 0) {
-      warn(`rotateSimulator: osascript failed (Accessibility not granted?): ${(res.stderr || res.stdout).split('\n')[0]}`);
-      break;
+      warn(`rotateSimulator: BotflowRotator exit ${res.code}: ${(res.stderr || res.stdout).split('\n')[0]}`);
+      // exit 3 = Accessibility not granted — retrying won't help.
+      if (res.code === 3) break;
     }
-    await sleep(900);
+    await sleep(1000);
   }
   return (await getOrientation(udid)) ?? target;
 }
