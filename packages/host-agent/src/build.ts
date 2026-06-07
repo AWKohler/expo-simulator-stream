@@ -7,6 +7,7 @@ import { execAsync } from './util.js';
 import { log, warn } from './log.js';
 import { parseProjectYml, type ProjectInfo } from './project-yml.js';
 import { extractDiagnostics, sanitizeLine } from './build-diagnostics.js';
+import { ensureOrientationShim } from './orientation-shim.js';
 
 const BUILDS_ROOT = path.join(tmpdir(), 'sim-builds');
 
@@ -195,6 +196,16 @@ export function runBuild(options: BuildOptions): BuildHandle {
         'CODE_SIGN_IDENTITY=',
         'CODE_SIGNING_REQUIRED=NO',
         'CODE_SIGNING_ALLOWED=NO',
+        // Preview-only orientation enablement: let Botflow's orientation toggle
+        // rotate ANY project — even ones scaffolded before the template gained a
+        // supported-orientations list. These override the generated Info.plist
+        // (only effective with GENERATE_INFOPLIST_FILE=YES, which the templates
+        // use). UIRequiresFullScreen is required so iPadOS doesn't reject the
+        // geometry change in windowed/Stage-Manager mode. This affects the
+        // simulator preview build only — never the user's device/App Store build.
+        'INFOPLIST_KEY_UIRequiresFullScreen=YES',
+        'INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone=UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight',
+        'INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad=UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight',
         'build',
       ];
       log(`xcodebuild ${args.join(' ')}`);
@@ -540,14 +551,26 @@ export async function installAndLaunch(
     throw new Error(`simctl install failed: ${install.stderr || install.stdout}`);
   }
   // `simctl launch` forwards SIMCTL_CHILD_*-prefixed env vars to the app process.
-  // We use that to inject the camera shim (DYLD_INSERT_LIBRARIES) and tell it
-  // where to dial for webcam frames — without touching the user's project.
-  const env: NodeJS.ProcessEnv | undefined = camera
-    ? {
-        SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: camera.dyldPath,
-        SIMCTL_CHILD_BOTFLOW_CAMERA_URL: camera.cameraUrl,
-      }
-    : undefined;
+  // We use that to inject our shims (DYLD_INSERT_LIBRARIES) without touching the
+  // user's project:
+  //   • the orientation shim — ALWAYS injected — registers Darwin observers so
+  //     Botflow's orientation toggle can rotate any app (even pre-observer ones);
+  //   • the camera shim — when a camera session is active — vends webcam frames.
+  // DYLD_INSERT_LIBRARIES is colon-separated, so both can ride together.
+  const insertLibs: string[] = [];
+  try {
+    insertLibs.push(await ensureOrientationShim());
+  } catch (e) {
+    warn(`orientation shim unavailable (rotation disabled for this launch): ${(e as Error).message}`);
+  }
+  if (camera) insertLibs.push(camera.dyldPath);
+  const env: NodeJS.ProcessEnv | undefined =
+    insertLibs.length > 0
+      ? {
+          SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: insertLibs.join(':'),
+          ...(camera ? { SIMCTL_CHILD_BOTFLOW_CAMERA_URL: camera.cameraUrl } : {}),
+        }
+      : undefined;
   // simctl launch returns immediately with PID; use --terminate-running-process so a
   // rebuild replaces the previous process cleanly.
   const launch = await execAsync(

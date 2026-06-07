@@ -244,21 +244,20 @@ export class Session extends EventEmitter {
   async setOrientation(orientation: Orientation): Promise<void> {
     this.desiredOrientation = orientation;
     if (this.phase !== 'ready') return; // applied at next capture start
-    const before = this.currentOrientation;
-    const actual = await rotateSimulator(this.udid, orientation);
-    this.currentOrientation = actual;
+    // Ask the app to rotate (Darwin notification → requestGeometryUpdate). This
+    // also paces ~1.5s, giving the app time to relayout before we re-probe.
+    await rotateSimulator(this.udid, orientation);
     this.deviceLogical =
       (await probeDeviceLogicalSize(this.udid, this.scaleHint)) ?? this.deviceLogical;
-    // The rotate changes the display dimensions. simctl/idb/sck stream JPEG
-    // frames that auto-adapt, but the framebuffer (H.264) path is bound to a
-    // fixed IOSurface + encoder, so restart it to pick up the new rotated
-    // surface and re-emit video_config. Only when the orientation actually
-    // changed (a failed/no-op rotate shouldn't blip the stream).
-    if (
-      actual !== before &&
-      this.activeCaptureMode === 'framebuffer' &&
-      this.framebufferCapturer
-    ) {
+    // The rotate changes the display dimensions. JPEG modes (simctl/idb/sck)
+    // auto-adapt per frame; the framebuffer (H.264) path is bound to a fixed
+    // IOSurface + encoder, so restart it to pick up the new rotated surface and
+    // re-emit video_config. The NEW config's aspect is the ground truth for the
+    // achieved orientation — startFramebufferCapture.onConfig emits it. We do NOT
+    // emit an optimistic orientation here: if the app couldn't rotate (e.g. a
+    // locked-orientation app), the surface stays put and the bezel correctly
+    // stays where it is rather than flipping to a letterboxed mismatch.
+    if (this.activeCaptureMode === 'framebuffer' && this.framebufferCapturer) {
       // Make sure the rotated display has rendered (new IOSurface exists) before
       // re-probing, so FindFramebuffer doesn't race the rotation animation.
       await this.waitForScreenReady(15_000);
@@ -275,8 +274,12 @@ export class Session extends EventEmitter {
       }
       this.framebufferCapturer = null;
       await this.startFramebufferCapture();
+    } else {
+      // JPEG capture modes auto-adapt; report the achieved orientation best-effort.
+      const actual = (await getOrientation(this.udid)) ?? orientation;
+      this.currentOrientation = actual;
+      this.emit('orientation', actual);
     }
-    this.emit('orientation', actual);
   }
 
   // ────────────────────────────────────────────────────────────────────────────
@@ -581,6 +584,15 @@ export class Session extends EventEmitter {
           this.windowInfo = { id: 0, x: 0, y: 0, w: config.width, h: config.height, scale: 1 };
           this.screenRect = { left: 0, top: 0, right: config.width, bottom: config.height };
           this.emit('videoConfig', config);
+          // The framebuffer surface IS the ground truth for orientation: its
+          // aspect reflects what the app actually rendered. Report it so the
+          // browser bezel only ever matches the real stream — never an optimistic
+          // rotate that the app couldn't honour (which would letterbox).
+          const real: Orientation = config.width > config.height ? 'landscape' : 'portrait';
+          if (real !== this.currentOrientation) {
+            this.currentOrientation = real;
+            this.emit('orientation', real);
+          }
           this.setPhase('ready', {
             windowInfo: this.windowInfo,
             screenRect: this.screenRect,
