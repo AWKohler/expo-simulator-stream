@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { DeviceModel, Orientation } from '@sim/shared';
 import { execAsync, sleep } from './util.js';
 import { log, warn } from './log.js';
+import { postOrientation } from './notifypost.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // simctl JSON types
@@ -391,51 +392,28 @@ export async function rotateSimulator(
   udid: string,
   target: Orientation,
 ): Promise<Orientation> {
-  // Real *device* rotation (gives a correctly-sized landscape framebuffer) is a
-  // GUI action: ⌘→ ("Rotate Right") in Simulator, driven via System Events. It
-  // needs Accessibility, which the host-agent's `node` binary is granted (a
-  // one-time grant in System Settings ▸ Privacy & Security ▸ Accessibility). We
-  // target THIS device's window by name so multi-slot hosts rotate the right
-  // one, then poll the screenshot aspect until the target orientation is hit.
-  const name = (getDeviceName(udid) ?? '').replace(/["\\]/g, '');
-  // Use the absolute "Orientation ▸ <orientation>" menu item, and first turn OFF
-  // "Rotate Device Automatically" (otherwise the sim, having no accelerometer,
-  // snaps back to portrait and ignores the manual choice).
-  const orientItem = target === 'landscape' ? 'Landscape Right' : 'Portrait';
-  const osa = [
-    'tell application "Simulator" to activate',
-    'delay 0.3',
-    'tell application "System Events" to tell process "Simulator"',
-    '  set frontmost to true',
-    '  try',
-    `    perform action "AXRaise" of (first window whose name contains "${name}")`,
-    '  end try',
-    '  delay 0.2',
-    '  set dmenu to menu 1 of menu bar item "Device" of menu bar 1',
-    '  try',
-    '    if (value of attribute "AXMenuItemMarkChar" of (menu item "Rotate Device Automatically" of dmenu)) is not "" then',
-    '      click menu item "Rotate Device Automatically" of dmenu',
-    '      delay 0.3',
-    '    end if',
-    '  end try',
-    `  click menu item "${orientItem}" of menu 1 of menu item "Orientation" of dmenu`,
-    'end tell',
-  ].join('\n');
-  const cmd = `osascript -e '${osa.replace(/'/g, "'\\''")}'`;
-  // Click once, then poll for the rotation to settle (the screenshot aspect lags
-  // the menu action). Re-click at most a couple of times — re-clicking churns
-  // the auto-rotate toggle, so we prefer waiting over re-issuing.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if ((await getOrientation(udid)) === target) return target;
-    const res = await execAsync(cmd, { timeoutMs: 8_000 });
-    if (res.code !== 0) {
-      warn(`rotateSimulator: osascript exit ${res.code}: ${(res.stderr || res.stdout).split('\n')[0]}`);
-      break;
-    }
-    for (let p = 0; p < 6; p++) {
-      await sleep(1500);
-      if ((await getOrientation(udid)) === target) return target;
-    }
+  // TCC-free, deterministic rotation. We post a Darwin notification into the
+  // guest's notify namespace via `simctl spawn notifypost`; the running Botflow
+  // template app receives it (BotflowPreviewOrientation observer) and rotates
+  // itself with the public requestGeometryUpdate API. No Accessibility, no GUI
+  // automation, no helper .app — and because the APP relayouts, the live
+  // IOSurface changes dimensions so the H.264 stream becomes landscape on its
+  // own (the framebuffer capturer is restarted by Session.setOrientation).
+  //
+  // Requirements (both satisfied by our templates): the app must allow the
+  // target orientation and set UIRequiresFullScreen=YES (so iPadOS doesn't
+  // reject the geometry change in windowed mode).
+  const posted = await postOrientation(udid, target);
+  if (!posted) {
+    warn(`rotateSimulator: notifypost failed for ${udid} -> ${target}`);
+    return (await getOrientation(udid)) ?? target;
   }
-  return (await getOrientation(udid)) ?? target;
+  // The geometry update lands in ~tens of ms; give it a moment, then report the
+  // observed orientation. (Detection via simctl screenshot dims lags briefly,
+  // so the authoritative signal downstream is the framebuffer surface size.)
+  for (let p = 0; p < 4; p++) {
+    await sleep(400);
+    if ((await getOrientation(udid)) === target) return target;
+  }
+  return target;
 }
