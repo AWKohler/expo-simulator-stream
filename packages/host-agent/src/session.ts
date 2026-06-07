@@ -244,41 +244,21 @@ export class Session extends EventEmitter {
   async setOrientation(orientation: Orientation): Promise<void> {
     this.desiredOrientation = orientation;
     if (this.phase !== 'ready') return; // applied at next capture start
-    // Ask the app to rotate (Darwin notification → requestGeometryUpdate). This
-    // also paces ~1.5s, giving the app time to relayout before we re-probe.
+    // Rotate the app's interface to `orientation`. IMPORTANT iOS-26 reality: the
+    // simulator's captured IOSurface stays portrait-native regardless of how we
+    // rotate — the app renders its landscape layout ROTATED into that portrait
+    // surface (status bar upright, content sideways). There is no host-side way
+    // to get a true landscape framebuffer, so the BROWSER compensates by rotating
+    // the video 90° for landscape (see device-frame). Because the framebuffer
+    // dimensions DON'T change, we must NOT restart the capturer (that would blip
+    // the stream for nothing) and we report the REQUESTED orientation so the
+    // browser knows to apply its 90° display rotation.
     await rotateSimulator(this.udid, orientation);
     this.deviceLogical =
       (await probeDeviceLogicalSize(this.udid, this.scaleHint)) ?? this.deviceLogical;
-    // The rotate changes the display dimensions. JPEG modes (simctl/idb/sck)
-    // auto-adapt per frame; the framebuffer (H.264) path is bound to a fixed
-    // IOSurface + encoder, so restart it to pick up the new rotated surface and
-    // re-emit video_config. The NEW config's aspect is the ground truth for the
-    // achieved orientation — startFramebufferCapture.onConfig emits it. We do NOT
-    // emit an optimistic orientation here: if the app couldn't rotate (e.g. a
-    // locked-orientation app), the surface stays put and the bezel correctly
-    // stays where it is rather than flipping to a letterboxed mismatch.
-    if (this.activeCaptureMode === 'framebuffer' && this.framebufferCapturer) {
-      // Make sure the rotated display has rendered (new IOSurface exists) before
-      // re-probing, so FindFramebuffer doesn't race the rotation animation.
-      await this.waitForScreenReady(15_000);
-      // Let the rotation animation + surface swap settle before we re-probe the
-      // IOSurface, so the fresh capturer doesn't catch a transient teardown.
-      await sleep(700);
-      // Invalidate the current capturer's callbacks BEFORE stopping it, so its
-      // onExit/onError (a deliberate stop) can't flip the session to 'error'.
-      this.captureGen++;
-      try {
-        this.framebufferCapturer.stop();
-      } catch {
-        /* ignore */
-      }
-      this.framebufferCapturer = null;
-      await this.startFramebufferCapture();
-    } else {
-      // JPEG capture modes auto-adapt; report the achieved orientation best-effort.
-      const actual = (await getOrientation(this.udid)) ?? orientation;
-      this.currentOrientation = actual;
-      this.emit('orientation', actual);
+    {
+      this.currentOrientation = orientation;
+      this.emit('orientation', orientation);
     }
   }
 
@@ -584,15 +564,11 @@ export class Session extends EventEmitter {
           this.windowInfo = { id: 0, x: 0, y: 0, w: config.width, h: config.height, scale: 1 };
           this.screenRect = { left: 0, top: 0, right: config.width, bottom: config.height };
           this.emit('videoConfig', config);
-          // The framebuffer surface IS the ground truth for orientation: its
-          // aspect reflects what the app actually rendered. Report it so the
-          // browser bezel only ever matches the real stream — never an optimistic
-          // rotate that the app couldn't honour (which would letterbox).
-          const real: Orientation = config.width > config.height ? 'landscape' : 'portrait';
-          if (real !== this.currentOrientation) {
-            this.currentOrientation = real;
-            this.emit('orientation', real);
-          }
+          // NOTE: do NOT derive orientation from config dims. On iOS 26 the
+          // captured surface is always portrait even when the app is landscape
+          // (the browser rotates the video for display), so dims would always say
+          // "portrait" and fight the requested orientation. Orientation is owned
+          // by setOrientation, which reports what the user asked for.
           this.setPhase('ready', {
             windowInfo: this.windowInfo,
             screenRect: this.screenRect,
