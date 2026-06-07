@@ -179,6 +179,13 @@ export class Session extends EventEmitter {
   private framebufferCapturer: FramebufferCapturerHandle | null = null;
   /** Capture mode actually chosen for this session (iPad forces simctl). */
   private activeCaptureMode: CaptureMode = ENV_CAPTURE_MODE;
+  /**
+   * Monotonic generation for the framebuffer capturer. A deliberate restart
+   * (e.g. on rotate) increments this; the OLD capturer's onExit/onError
+   * callbacks carry their original generation and are ignored once stale — so
+   * stopping a capturer on purpose never errors the session.
+   */
+  private captureGen = 0;
 
   constructor(init: SessionInit) {
     super();
@@ -255,6 +262,12 @@ export class Session extends EventEmitter {
       // Make sure the rotated display has rendered (new IOSurface exists) before
       // re-probing, so FindFramebuffer doesn't race the rotation animation.
       await this.waitForScreenReady(15_000);
+      // Let the rotation animation + surface swap settle before we re-probe the
+      // IOSurface, so the fresh capturer doesn't catch a transient teardown.
+      await sleep(700);
+      // Invalidate the current capturer's callbacks BEFORE stopping it, so its
+      // onExit/onError (a deliberate stop) can't flip the session to 'error'.
+      this.captureGen++;
       try {
         this.framebufferCapturer.stop();
       } catch {
@@ -540,11 +553,15 @@ export class Session extends EventEmitter {
     this.screenRect = { left: 0, top: 0, right: physical.w, bottom: physical.h };
 
     let gotConfig = false;
+    const gen = ++this.captureGen;
+    // True once a newer capturer generation supersedes this one (a deliberate
+    // restart, e.g. on rotate). Stale callbacks must not touch session state.
+    const isStale = () => gen !== this.captureGen;
     // Watchdog: if the native capturer never locates the SimDisplay IOSurface
     // (no onConfig), error out so the slot is released rather than leaking a
     // stuck session that wedges the queue.
     const configWatchdog = setTimeout(() => {
-      if (!gotConfig && this.phase !== 'ending' && this.phase !== 'ended' && this.phase !== 'ready') {
+      if (!isStale() && !gotConfig && this.phase !== 'ending' && this.phase !== 'ended' && this.phase !== 'ready') {
         err(`framebuffer capturer: no video_config within 45s — failing session`);
         this.setPhase('error', { message: 'Capture did not start (no framebuffer surface).' });
       }
@@ -558,6 +575,7 @@ export class Session extends EventEmitter {
       },
       {
         onConfig: (config) => {
+          if (isStale()) return;
           gotConfig = true;
           clearTimeout(configWatchdog);
           this.windowInfo = { id: 0, x: 0, y: 0, w: config.width, h: config.height, scale: 1 };
@@ -569,14 +587,21 @@ export class Session extends EventEmitter {
             deviceLogical: this.deviceLogical,
           });
         },
-        onChunk: (chunk) => this.emit('videoChunk', chunk),
+        onChunk: (chunk) => {
+          if (isStale()) return;
+          this.emit('videoChunk', chunk);
+        },
         onError: (message) => {
+          // A capturer that's been superseded (rotate restart) is expected to
+          // exit/error — never let that take down the live session.
+          if (isStale()) return;
           err(`framebuffer capturer: ${message}`);
           if (!gotConfig && this.phase !== 'ending' && this.phase !== 'ended') {
             this.setPhase('error', { message });
           }
         },
         onExit: (reason) => {
+          if (isStale()) return;
           if (this.phase !== 'ending' && this.phase !== 'ended') {
             this.setPhase('error', { message: `framebuffer capturer stopped: ${reason}` });
           }
