@@ -365,15 +365,14 @@ export async function probeDeviceLogicalSize(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Orientation — detection + best-effort rotation
+// Orientation — detection + rotation
 //
-// simctl has no rotate verb, so we drive the Simulator.app "Rotate Right"
-// shortcut (⌘→) via osascript and poll the screenshot aspect ratio until it
-// matches the target. This requires Accessibility permission for the process
-// sending the key event; if that's not granted the rotate is a no-op and the
-// caller falls back to the device's current orientation (reported up the chain
-// so the bezel still matches the real stream). Single focused-window
-// assumption — fine for the 1–2 slot hosts we run.
+// Rotation is TCC-free and deterministic: we post a Darwin notification into the
+// guest (via `simctl spawn notifypost`), which the running Botflow template app
+// turns into a requestGeometryUpdate(...) call (see rotateSimulator below). No
+// Accessibility, no GUI scripting. getOrientation() reads the simctl screenshot
+// aspect for a coarse check, but the authoritative orientation downstream is the
+// live framebuffer IOSurface size (the capturer is restarted on change).
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function getOrientation(udid: string): Promise<Orientation | null> {
