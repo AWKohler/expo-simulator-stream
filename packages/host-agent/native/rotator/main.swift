@@ -10,9 +10,17 @@
 import Cocoa
 import ApplicationServices
 
-func err(_ s: String) { FileHandle.standardError.write((s + "\n").data(using: .utf8)!) }
+let logPath = "/tmp/botflow_rotator.log"
+func dlog(_ s: String) {
+  FileHandle.standardError.write((s + "\n").data(using: .utf8)!)
+  if let h = FileHandle(forWritingAtPath: logPath) ?? { FileManager.default.createFile(atPath: logPath, contents: nil); return FileHandle(forWritingAtPath: logPath) }() {
+    h.seekToEndOfFile(); h.write((s + "\n").data(using: .utf8)!); h.closeFile()
+  }
+}
+func err(_ s: String) { dlog(s) }
 
 let nameMatch = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ""
+dlog("rotator: start, nameMatch='\(nameMatch)'")
 
 guard let sim = NSWorkspace.shared.runningApplications.first(where: {
   $0.bundleIdentifier == "com.apple.iphonesimulator"
@@ -32,18 +40,25 @@ if axStatus == .apiDisabled || axStatus == .notImplemented {
   err("rotator: Accessibility not granted (AX status \(axStatus.rawValue))")
   exit(3)
 }
+dlog("rotator: AX status=\(axStatus.rawValue), simPid=\(sim.processIdentifier), frontmost=\(sim.isActive)")
+var raised = false
 if let windows = windowsRef as? [AXUIElement] {
+  dlog("rotator: \(windows.count) windows")
   for w in windows {
     var titleRef: CFTypeRef?
     AXUIElementCopyAttributeValue(w, kAXTitleAttribute as CFString, &titleRef)
     let title = (titleRef as? String) ?? ""
+    dlog("rotator:   window title='\(title)'")
     if nameMatch.isEmpty || title.contains(nameMatch) {
       AXUIElementSetAttributeValue(w, kAXMainAttribute as CFString, kCFBooleanTrue)
-      AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+      let r1 = AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+      dlog("rotator:   raised '\(title)' status=\(r1.rawValue)")
+      raised = true
       break
     }
   }
 }
+dlog("rotator: raised=\(raised)")
 usleep(250_000)
 
 // Send ⌘→ (key code 0x7C = Right Arrow) → Simulator "Rotate Right".
@@ -59,4 +74,4 @@ down.post(tap: .cghidEventTap)
 usleep(50_000)
 up.post(tap: .cghidEventTap)
 usleep(150_000)
-print("rotator: rotated window matching '\(nameMatch)'")
+dlog("rotator: posted Cmd+Right; done")
