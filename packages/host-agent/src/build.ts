@@ -261,11 +261,26 @@ export function runBuild(options: BuildOptions): BuildHandle {
       throw err;
     }
 
-    const appBundlePath = path.join(
+    // Same caveat as the device build below: the .app is named after
+    // PRODUCT_NAME and lives under `<Configuration>-iphonesimulator`, neither of
+    // which is guaranteed to equal `${project.scheme}` / `Debug`. Try the
+    // conventional path first, then discover the real product.
+    let appBundlePath = path.join(
       derivedData,
       'Build/Products/Debug-iphonesimulator',
       `${project.scheme}.app`,
     );
+    if (!existsSync(appBundlePath)) {
+      const productsDir = path.join(derivedData, 'Build/Products');
+      const glob = await execAsync(
+        `find "${productsDir}" -maxdepth 2 -type d -name '*.app' -path '*-iphonesimulator/*.app' 2>/dev/null | head -1`,
+      );
+      const found = glob.stdout.trim();
+      if (found) {
+        log(`.app not at conventional path — discovered at ${path.basename(found)}`);
+        appBundlePath = found;
+      }
+    }
     if (!existsSync(appBundlePath)) {
       throw new Error(`Build succeeded but .app missing at ${appBundlePath}`);
     }
@@ -459,11 +474,31 @@ export function runDeviceBuild(options: DeviceBuildOptions): DeviceBuildHandle {
       throw err;
     }
 
-    const appBundlePath = path.join(
+    // The built bundle is named after the target's PRODUCT_NAME and lives in a
+    // `<Configuration>-iphoneos` directory — NEITHER of which is guaranteed to
+    // equal `${project.scheme}` / `Debug`. `project.scheme` comes from the
+    // project.yml top-level `name:`, while the .app filename is PRODUCT_NAME and
+    // the dir is the scheme's build configuration; they only coincide in the
+    // stock template. A renamed PRODUCT_NAME or a non-Debug scheme leaves a
+    // *successful* build's product at a sibling path (e.g. Release-iphoneos/, or
+    // <ProductName>.app), so reconstructing the path from those assumptions
+    // misses it. Try the conventional path first, then discover the real one.
+    let appBundlePath = path.join(
       derivedData,
       'Build/Products/Debug-iphoneos',
       `${project.scheme}.app`,
     );
+    if (!existsSync(appBundlePath)) {
+      const productsDir = path.join(derivedData, 'Build/Products');
+      const glob = await execAsync(
+        `find "${productsDir}" -maxdepth 2 -type d -name '*.app' -path '*-iphoneos/*.app' 2>/dev/null | head -1`,
+      );
+      const found = glob.stdout.trim();
+      if (found) {
+        log(`device .app not at conventional path — discovered at ${path.basename(found)}`);
+        appBundlePath = found;
+      }
+    }
     if (!existsSync(appBundlePath)) {
       throw new Error(`Device build succeeded but .app missing at ${appBundlePath}`);
     }
@@ -479,7 +514,9 @@ export function runDeviceBuild(options: DeviceBuildOptions): DeviceBuildHandle {
 
     const ipaRoot = path.join(workdir, 'ipa');
     const payloadDir = path.join(ipaRoot, 'Payload');
-    const payloadAppPath = path.join(payloadDir, `${project.scheme}.app`);
+    // Keep the bundle's real name inside Payload/ — renaming it to the scheme
+    // would produce a malformed IPA when PRODUCT_NAME differs from the scheme.
+    const payloadAppPath = path.join(payloadDir, path.basename(appBundlePath));
     mkdirSync(payloadDir, { recursive: true });
 
     const copy = await execAsync(
